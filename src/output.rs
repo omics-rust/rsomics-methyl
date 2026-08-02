@@ -20,13 +20,27 @@ pub(crate) fn commit_all<T>(
     items: &mut [T],
     mut output: impl FnMut(&mut T) -> &mut TransactionalOutput,
 ) -> Result<()> {
+    let mut parents = Vec::new();
     for item in &mut *items {
-        output(item).prepare()?;
+        let output = output(item);
+        output.prepare()?;
+        if !parents.contains(&output.parent) {
+            parents.push(output.parent.clone());
+        }
     }
     for index in 0..items.len() {
         if let Err(error) = output(&mut items[index]).commit() {
             let mut cause = error;
             for item in items[..=index].iter_mut().rev() {
+                cause = output(item).restore(cause);
+            }
+            return Err(cause);
+        }
+    }
+    for parent in parents {
+        if let Err(error) = sync_directory(&parent) {
+            let mut cause = error;
+            for item in items.iter_mut().rev() {
                 cause = output(item).restore(cause);
             }
             return Err(cause);
@@ -105,10 +119,6 @@ impl TransactionalOutput {
                 format!("committing output {}: {}", self.path.display(), error.error),
             ))
         })?;
-        #[cfg(unix)]
-        fs::File::open(&self.parent)
-            .and_then(|directory| directory.sync_all())
-            .rs_with_context(|| format!("syncing output directory {}", self.parent.display()))?;
         Ok(())
     }
 
@@ -174,4 +184,18 @@ fn parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .rs_with_context(|| format!("syncing output directory {}", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
