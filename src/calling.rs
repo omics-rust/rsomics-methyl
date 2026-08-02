@@ -2,7 +2,7 @@ use rsomics_bamio::raw::RawRecord;
 use rsomics_common::Result;
 
 use crate::alignment::invalid_record;
-use crate::context::{ReferenceStrand, SequenceContext, classify_call};
+use crate::context::{ReferenceStrand, SequenceContext, classify_call, is_cpg_call};
 use crate::reference::{IndexedReference, ReferenceSequence};
 use crate::strand::{BisulfiteStrand, bisulfite_strand};
 
@@ -48,6 +48,22 @@ impl AlignmentCaller {
     pub(crate) fn visit(
         &mut self,
         record: &RawRecord,
+        emit: impl FnMut(MethylationCall) -> Result<()>,
+    ) -> Result<AlignmentLocation> {
+        self.visit_contexts::<false>(record, emit)
+    }
+
+    pub(crate) fn visit_cpg(
+        &mut self,
+        record: &RawRecord,
+        emit: impl FnMut(MethylationCall) -> Result<()>,
+    ) -> Result<AlignmentLocation> {
+        self.visit_contexts::<true>(record, emit)
+    }
+
+    fn visit_contexts<const CPG_ONLY: bool>(
+        &mut self,
+        record: &RawRecord,
         mut emit: impl FnMut(MethylationCall) -> Result<()>,
     ) -> Result<AlignmentLocation> {
         let reference_id = usize::try_from(record.reference_sequence_id())
@@ -66,7 +82,13 @@ impl AlignmentCaller {
         let quality_scores = record.quality_scores();
         let mut query_position = 0usize;
         let mut reference_position = start;
-        for (kind, raw_length) in record.decoded_cigar()? {
+        for (kind, raw_length) in cigar_operations(record)? {
+            if raw_length == 0 {
+                return Err(invalid_record(
+                    record,
+                    "CIGAR contains a zero-length operation",
+                ));
+            }
             let length =
                 usize::try_from(raw_length).map_err(|error| invalid_record(record, error))?;
             match kind {
@@ -85,14 +107,14 @@ impl AlignmentCaller {
                         if quality >= self.minimum_base_quality
                             && let Some(methylated) =
                                 methylation_state(strand, packed_base(sequence, query_position))
-                            && let Some((context, reference_strand)) = classify_call(
+                            && let Some(context) = Self::call_context::<CPG_ONLY>(
                                 &mut self.reference,
                                 reference_id,
-                                &reference.name,
+                                reference,
                                 reference_length,
                                 reference_position,
+                                strand,
                             )?
-                            && strand.is_top() == (reference_strand == ReferenceStrand::Forward)
                         {
                             emit(MethylationCall {
                                 context,
@@ -146,12 +168,70 @@ impl AlignmentCaller {
         })
     }
 
+    #[inline]
+    fn call_context<const CPG_ONLY: bool>(
+        reference_cache: &mut IndexedReference,
+        reference_id: usize,
+        reference: &ReferenceSequence,
+        reference_length: usize,
+        reference_position: usize,
+        strand: BisulfiteStrand,
+    ) -> Result<Option<SequenceContext>> {
+        if CPG_ONLY {
+            return is_cpg_call(
+                reference_cache,
+                reference_id,
+                &reference.name,
+                reference_length,
+                reference_position,
+                strand.is_top(),
+            )
+            .map(|is_cpg| is_cpg.then_some(SequenceContext::Cpg));
+        }
+        Ok(classify_call(
+            reference_cache,
+            reference_id,
+            &reference.name,
+            reference_length,
+            reference_position,
+        )?
+        .and_then(|(context, reference_strand)| {
+            (strand.is_top() == (reference_strand == ReferenceStrand::Forward)).then_some(context)
+        }))
+    }
+
     pub(crate) fn reference_name(&self, reference_id: usize) -> &str {
         self.references
             .get(reference_id)
             .map(|reference| reference.name.as_ref())
             .expect("alignment location has a validated reference ID")
     }
+}
+
+enum CigarOperations {
+    One(Option<(u8, u32)>),
+    Many(std::vec::IntoIter<(u8, u32)>),
+}
+
+impl Iterator for CigarOperations {
+    type Item = (u8, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::One(operation) => operation.take(),
+            Self::Many(operations) => operations.next(),
+        }
+    }
+}
+
+fn cigar_operations(record: &RawRecord) -> Result<CigarOperations> {
+    let mut operations = record.cigar_ops();
+    let first = operations.next();
+    let second = operations.next();
+    if let (Some(operation), None) = (first, second) {
+        return Ok(CigarOperations::One(Some(operation)));
+    }
+    Ok(CigarOperations::Many(record.decoded_cigar()?.into_iter()))
 }
 
 pub(crate) fn read_number(record: &RawRecord) -> u8 {

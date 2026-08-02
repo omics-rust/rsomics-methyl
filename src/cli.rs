@@ -361,7 +361,7 @@ fn execute_per_read(args: PerReadArgs, json: bool) -> Result<ExecutionReport> {
     };
     let stats = write_output(args.output.as_deref(), |writer| {
         per_read(&args.input, &args.reference, options, |metric| {
-            write_per_read(writer, &metric)
+            write_per_read(writer, metric)
         })
     })?;
     Ok(ExecutionReport {
@@ -379,27 +379,51 @@ fn execute_per_read(args: PerReadArgs, json: bool) -> Result<ExecutionReport> {
     })
 }
 
-fn write_per_read(writer: &mut dyn Write, metric: &PerReadMetric) -> Result<()> {
-    if metric.informative_bases() == 0 {
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t0.0\t0",
-            metric.name(),
-            metric.chromosome(),
-            metric.start()
-        )
-    } else {
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{:.6}\t{}",
-            metric.name(),
-            metric.chromosome(),
-            metric.start(),
-            metric.percentage(),
-            metric.informative_bases()
-        )
+fn write_per_read(writer: &mut dyn Write, metric: PerReadMetric) -> Result<()> {
+    write_per_read_fields(writer, metric).map_err(RsomicsError::Io)
+}
+
+fn write_per_read_fields(writer: &mut dyn Write, metric: PerReadMetric) -> io::Result<()> {
+    writer.write_all(metric.name().as_bytes())?;
+    writer.write_all(b"\t")?;
+    writer.write_all(metric.chromosome().as_bytes())?;
+    writer.write_all(b"\t")?;
+    write_integer(writer, metric.start())?;
+    writer.write_all(b"\t")?;
+    let informative = metric.informative_bases();
+    if informative == 0 {
+        writer.write_all(b"0.0\t0\n")?;
+        return Ok(());
     }
-    .map_err(RsomicsError::Io)
+    write_percentage(writer, metric.methylated(), informative)?;
+    writer.write_all(b"\t")?;
+    write_integer(writer, informative)?;
+    writer.write_all(b"\n")
+}
+
+fn write_integer(writer: &mut dyn Write, value: u64) -> io::Result<()> {
+    let mut buffer = itoa::Buffer::new();
+    writer.write_all(buffer.format(value).as_bytes())
+}
+
+fn write_percentage(writer: &mut dyn Write, methylated: u64, informative: u64) -> io::Result<()> {
+    let denominator = u128::from(informative);
+    let numerator = u128::from(methylated) * 100_000_000;
+    let mut scaled = numerator / denominator;
+    let remainder = numerator % denominator;
+    if remainder * 2 > denominator || remainder * 2 == denominator && scaled % 2 == 1 {
+        scaled += 1;
+    }
+    let whole = u64::try_from(scaled / 1_000_000).expect("percentage is at most 100");
+    write_integer(writer, whole)?;
+    writer.write_all(b".")?;
+    let mut fraction = u64::try_from(scaled % 1_000_000).expect("fraction has six digits");
+    let mut digits = [b'0'; 6];
+    for digit in digits.iter_mut().rev() {
+        *digit += u8::try_from(fraction % 10).expect("decimal digit fits in u8");
+        fraction /= 10;
+    }
+    writer.write_all(&digits)
 }
 
 fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
@@ -534,4 +558,21 @@ fn report(stats: MergeContextStats, output: Option<&Path>) -> ExecutionReport {
 
 fn is_stdout(output: Option<&Path>) -> bool {
     output.is_none_or(|path| path == Path::new("-"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_percentage_matches_six_decimal_float_output() {
+        for informative in 1..=1024 {
+            for methylated in 0..=informative {
+                let mut actual = Vec::new();
+                write_percentage(&mut actual, methylated, informative).unwrap();
+                let expected = format!("{:.6}", methylated as f64 * 100.0 / informative as f64);
+                assert_eq!(actual, expected.as_bytes());
+            }
+        }
+    }
 }

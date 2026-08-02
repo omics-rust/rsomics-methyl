@@ -7,7 +7,6 @@ use rsomics_common::{Result, RsomicsError};
 use crate::alignment::{AlignmentFilter, invalid_record};
 use crate::bed::BedSelection;
 use crate::calling::{AlignmentCaller, AlignmentLocation};
-use crate::context::SequenceContext;
 use crate::reference::IndexedReference;
 use crate::selection::{alignment_error, resolve_region, visit_alignment_records};
 
@@ -38,22 +37,22 @@ impl Default for PerReadOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PerReadMetric {
-    name: String,
-    chromosome: String,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PerReadMetric<'a> {
+    name: &'a str,
+    chromosome: &'a str,
     start: u64,
     methylated: u64,
     unmethylated: u64,
 }
 
-impl PerReadMetric {
+impl PerReadMetric<'_> {
     pub fn name(&self) -> &str {
-        &self.name
+        self.name
     }
 
     pub fn chromosome(&self) -> &str {
-        &self.chromosome
+        self.chromosome
     }
 
     pub fn start(&self) -> u64 {
@@ -93,7 +92,7 @@ pub fn per_read(
     input: &Path,
     reference: &Path,
     options: PerReadOptions,
-    mut emit: impl FnMut(PerReadMetric) -> Result<()>,
+    mut emit: impl for<'a> FnMut(PerReadMetric<'a>) -> Result<()>,
 ) -> Result<PerReadStats> {
     if options.minimum_base_quality == 0 {
         return Err(RsomicsError::ConfigError(
@@ -161,7 +160,15 @@ pub fn per_read(
             stats.filtered_records = checked_increment(stats.filtered_records, "filtered record")?;
             return Ok(());
         }
-        emit(result.metric)?;
+        let name = std::str::from_utf8(record.name())
+            .map_err(|_| invalid_record(&record, "read name is not UTF-8"))?;
+        emit(PerReadMetric {
+            name,
+            chromosome: caller.calls.reference_name(result.location.reference_id),
+            start: result.location.start,
+            methylated: result.methylated,
+            unmethylated: result.unmethylated,
+        })?;
         stats.output_records = checked_increment(stats.output_records, "output record")?;
         Ok(())
     })?;
@@ -173,36 +180,27 @@ struct PerReadCaller {
 }
 
 struct PerReadCall {
-    metric: PerReadMetric,
     location: AlignmentLocation,
+    methylated: u64,
+    unmethylated: u64,
 }
 
 impl PerReadCaller {
     fn metric(&mut self, record: &RawRecord) -> Result<PerReadCall> {
         let mut methylated = 0u64;
         let mut unmethylated = 0u64;
-        let location = self.calls.visit(record, |call| {
-            if call.context == SequenceContext::Cpg {
-                if call.methylated {
-                    methylated = checked_increment(methylated, "methylated count")?;
-                } else {
-                    unmethylated = checked_increment(unmethylated, "unmethylated count")?;
-                }
+        let location = self.calls.visit_cpg(record, |call| {
+            if call.methylated {
+                methylated = checked_increment(methylated, "methylated count")?;
+            } else {
+                unmethylated = checked_increment(unmethylated, "unmethylated count")?;
             }
             Ok(())
         })?;
-        let name = String::from_utf8(record.name().to_vec())
-            .map_err(|_| invalid_record(record, "read name is not UTF-8"))?;
-        let chromosome = self.calls.reference_name(location.reference_id).to_owned();
         Ok(PerReadCall {
-            metric: PerReadMetric {
-                name,
-                chromosome,
-                start: location.start,
-                methylated,
-                unmethylated,
-            },
             location,
+            methylated,
+            unmethylated,
         })
     }
 }
@@ -302,9 +300,9 @@ mod tests {
         value.extend_from_slice(&(1u32 << 4).to_le_bytes());
         record.append_aux(*b"CG", b'B', &value).unwrap();
 
-        let metric = caller.metric(&record).unwrap().metric;
-        assert_eq!(metric.methylated(), 1);
-        assert_eq!(metric.informative_bases(), 1);
+        let metric = caller.metric(&record).unwrap();
+        assert_eq!(metric.methylated, 1);
+        assert_eq!(metric.methylated + metric.unmethylated, 1);
     }
 
     #[test]
@@ -315,9 +313,9 @@ mod tests {
         let (_directory, mut caller) = caller(&reference);
         let record = raw(&[(0, 1), (3, 20_000), (0, 1)], b"CC");
 
-        let metric = caller.metric(&record).unwrap().metric;
-        assert_eq!(metric.methylated(), 2);
-        assert_eq!(metric.informative_bases(), 2);
+        let metric = caller.metric(&record).unwrap();
+        assert_eq!(metric.methylated, 2);
+        assert_eq!(metric.methylated + metric.unmethylated, 2);
     }
 
     #[test]
@@ -325,8 +323,8 @@ mod tests {
         let (_directory, mut caller) = caller(b"CGCG");
         let record = raw_with_qualities(&[(0, 1), (2, 1), (0, 1)], b"CC", &[0, 40]);
 
-        let metric = caller.metric(&record).unwrap().metric;
-        assert_eq!(metric.methylated(), 1);
-        assert_eq!(metric.informative_bases(), 1);
+        let metric = caller.metric(&record).unwrap();
+        assert_eq!(metric.methylated, 1);
+        assert_eq!(metric.methylated + metric.unmethylated, 1);
     }
 }

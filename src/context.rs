@@ -65,6 +65,35 @@ pub(crate) fn classify_call(
 }
 
 #[inline]
+pub(crate) fn is_cpg_call(
+    reference: &mut IndexedReference,
+    reference_id: usize,
+    chromosome: &str,
+    length: usize,
+    position: usize,
+    top: bool,
+) -> Result<bool> {
+    if position >= length {
+        return Err(reference.error(format!(
+            "{chromosome}:{position} is outside reference length {length}"
+        )));
+    }
+    let range = if top {
+        if position + 1 >= length {
+            return Ok(false);
+        }
+        position..position + 2
+    } else {
+        if position == 0 {
+            return Ok(false);
+        }
+        position - 1..position + 1
+    };
+    let sequence = reference.sequence_by_id(reference_id, chromosome, range)?;
+    Ok(sequence[0].eq_ignore_ascii_case(&b'C') && sequence[1].eq_ignore_ascii_case(&b'G'))
+}
+
+#[inline]
 fn context_window<'a>(
     reference: &'a mut IndexedReference,
     reference_id: usize,
@@ -190,5 +219,9 @@ mod tests {
             SequenceContext::Chh
         );
         assert_eq!(classify(&mut reference, 0, "chr1", 7, 6).unwrap(), None);
+        assert!(is_cpg_call(&mut reference, 0, "chr1", 7, 0, true).unwrap());
+        assert!(is_cpg_call(&mut reference, 0, "chr1", 7, 1, false).unwrap());
+        assert!(!is_cpg_call(&mut reference, 0, "chr1", 7, 0, false).unwrap());
+        assert!(!is_cpg_call(&mut reference, 0, "chr1", 7, 6, true).unwrap());
     }
 }
