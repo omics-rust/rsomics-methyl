@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use noodles::core::{Position, Region};
 use noodles::fasta;
+use noodles::sam;
 use rsomics_common::{Result, RsomicsError};
 
 const CHUNK_SIZE: usize = 1024 * 1024;
@@ -38,6 +39,30 @@ impl IndexedReference {
             .find(|record| record.name() == chromosome.as_bytes())
             .map(fasta::fai::Record::length)
             .ok_or_else(|| self.error(format!("unknown chromosome {chromosome}")))
+    }
+
+    pub(crate) fn validate_header(&self, header: &sam::Header) -> Result<Vec<ReferenceSequence>> {
+        header
+            .reference_sequences()
+            .iter()
+            .map(|(name, sequence)| {
+                let name = String::from_utf8(name.to_vec()).map_err(|_| {
+                    self.error("alignment header contains a non-UTF-8 reference name")
+                })?;
+                let alignment_length = u64::try_from(usize::from(sequence.length()))
+                    .map_err(|error| self.error(error))?;
+                let reference_length = self.length(&name)?;
+                if alignment_length != reference_length {
+                    return Err(self.error(format!(
+                        "header length {alignment_length} for {name} differs from indexed reference length {reference_length}"
+                    )));
+                }
+                Ok(ReferenceSequence {
+                    name,
+                    length: reference_length,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn sequence(&mut self, chromosome: &str, range: Range<usize>) -> Result<&[u8]> {
@@ -94,4 +119,10 @@ impl IndexedReference {
             path.display()
         ))
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReferenceSequence {
+    pub(crate) name: String,
+    pub(crate) length: u64,
 }
