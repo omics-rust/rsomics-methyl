@@ -1,0 +1,33 @@
+[package]
+name = "rsomics-methyl"
+version = "0.1.0"
+description = "Bisulfite-sequencing methylation extraction and bias QC"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-methyl"
+homepage = "https://github.com/omics-rust/rsomics-methyl"
+documentation = "https://docs.rs/rsomics-methyl"
+authors = ["Zane Leong <efd@live.com>"]
+readme = "README.md"
+categories = ["science", "command-line-utilities"]
+keywords = ["methylation", "bisulfite", "bam", "epigenomics", "bioinformatics"]
+
+[lib]
+name = "rsomics_methyl"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "rsomics-methyl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+noodles = { version = "0.110", features = ["core", "fasta"] }
+rsomics-common = "0.12"
+rsomics-help = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

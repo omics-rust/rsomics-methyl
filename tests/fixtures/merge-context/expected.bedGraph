@@ -1,0 +1,4 @@
+track type="bedGraph" description="merged Methylation metrics"
+chr1	1	3	75	3	1
+chr1	3	4	0	0	1
+chr1	4	7	25	1	3
