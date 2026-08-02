@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use rsomics_common::{
     OutputArgs, Result, RsomicsError, ToolMeta, reject_output_alias, write_output,
 };
@@ -53,6 +53,10 @@ struct ExtractArgs {
     #[arg(short, long)]
     output_prefix: PathBuf,
 
+    /// Output representation.
+    #[arg(long, value_enum, default_value = "standard")]
+    format: ExtractFormat,
+
     /// Minimum alignment mapping quality.
     #[arg(short = 'q', long, default_value_t = 10)]
     minimum_mapping_quality: u8,
@@ -102,6 +106,15 @@ struct ExtractArgs {
     chh: bool,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ExtractFormat {
+    Standard,
+    Fraction,
+    Counts,
+    Logit,
+    MethylKit,
+}
+
 #[derive(Debug, Args)]
 struct MergeContextArgs {
     /// Indexed reference FASTA.
@@ -149,8 +162,13 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         chg: args.chg,
         chh: args.chh,
     };
-    let result =
-        extract_to_standard_outputs(&args.input, &args.reference, &args.output_prefix, options)?;
+    let result = extract_to_standard_outputs(
+        &args.input,
+        &args.reference,
+        &args.output_prefix,
+        args.format,
+        options,
+    )?;
     Ok(ExecutionReport {
         operation: "extract",
         input_records: result.stats.input_records,

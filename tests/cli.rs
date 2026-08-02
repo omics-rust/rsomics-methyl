@@ -39,6 +39,53 @@ fn extract_cli_matches_methyldackel_golden() {
 }
 
 #[test]
+fn alternative_extract_formats_match_methyldackel_goldens() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for (format, suffix, expected_name) in [
+        (
+            "fraction",
+            "_CpG.meth.bedGraph",
+            "expected.fraction.bedGraph",
+        ),
+        ("counts", "_CpG.counts.bedGraph", "expected.counts.bedGraph"),
+        ("logit", "_CpG.logit.bedGraph", "expected.logit.bedGraph"),
+        ("methyl-kit", "_CpG.methylKit", "expected.methylKit"),
+    ] {
+        let prefix = directory.path().join(format);
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args([
+                "extract",
+                fixture.join("synthetic.fa").to_str().unwrap(),
+                fixture.join("synthetic.bam").to_str().unwrap(),
+                "--output-prefix",
+                prefix.to_str().unwrap(),
+                "--format",
+                format,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{format}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed = std::fs::read_to_string(format!("{}{suffix}", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let expected = std::fs::read_to_string(fixture.join(expected_name))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected, "{format}");
+    }
+}
+
+#[test]
 fn failed_extract_preserves_every_existing_context_output() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();

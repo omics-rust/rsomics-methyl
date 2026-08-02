@@ -6,9 +6,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use rsomics_common::{Context, Result, RsomicsError, reject_output_alias};
-use rsomics_methyl::SequenceContext;
 use rsomics_methyl::extract::{ExtractOptions, ExtractStats, SiteMetric, extract};
+use rsomics_methyl::{ReferenceStrand, SequenceContext};
 use tempfile::{Builder, NamedTempFile};
+
+use crate::cli::ExtractFormat;
 
 pub struct ExtractOutputResult {
     pub stats: ExtractStats,
@@ -19,9 +21,10 @@ pub fn extract_to_standard_outputs(
     input: &Path,
     reference: &Path,
     prefix: &Path,
+    format: ExtractFormat,
     options: ExtractOptions,
 ) -> Result<ExtractOutputResult> {
-    let mut outputs = ContextOutputs::new(prefix, input, reference, &options)?;
+    let mut outputs = ContextOutputs::new(prefix, input, reference, format, &options)?;
     let paths = outputs.paths();
     let stats = extract(input, reference, options, |metric| outputs.write(&metric))?;
     outputs.commit()?;
@@ -32,6 +35,7 @@ pub fn extract_to_standard_outputs(
 }
 
 struct ContextOutputs {
+    format: ExtractFormat,
     entries: Vec<OutputEntry>,
 }
 
@@ -40,6 +44,7 @@ impl ContextOutputs {
         prefix: &Path,
         input: &Path,
         reference: &Path,
+        format: ExtractFormat,
         options: &ExtractOptions,
     ) -> Result<Self> {
         let mut entries = Vec::new();
@@ -51,7 +56,7 @@ impl ContextOutputs {
             if !enabled {
                 continue;
             }
-            let path = context_path(prefix, label);
+            let path = context_path(prefix, label, format);
             reject_output_alias(&path, [input, reference])?;
             reject_output_alias(
                 &path,
@@ -66,16 +71,10 @@ impl ContextOutputs {
                 "at least one methylation context must be enabled".into(),
             ));
         }
-        let mut outputs = Self { entries };
+        let mut outputs = Self { format, entries };
         for entry in &mut outputs.entries {
             let label = entry.label;
-            writeln!(
-                entry.file(),
-                "track type=\"bedGraph\" description=\"{} {} methylation levels\"",
-                prefix.display(),
-                label
-            )
-            .map_err(RsomicsError::Io)?;
+            format.write_header(entry.file(), prefix, label)?;
         }
         Ok(outputs)
     }
@@ -93,17 +92,7 @@ impl ContextOutputs {
             .iter_mut()
             .find(|entry| entry.context == metric.context())
             .ok_or_else(|| RsomicsError::ConfigError("methylation context has no output".into()))?;
-        writeln!(
-            entry.file(),
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            metric.chromosome(),
-            metric.start(),
-            metric.end(),
-            metric.percentage(),
-            metric.methylated(),
-            metric.unmethylated()
-        )
-        .map_err(RsomicsError::Io)
+        self.format.write_metric(entry.file(), metric)
     }
 
     fn commit(mut self) -> Result<()> {
@@ -281,9 +270,97 @@ impl Backup {
     }
 }
 
-fn context_path(prefix: &Path, context: &str) -> PathBuf {
+impl ExtractFormat {
+    fn suffix(self, context: &str) -> String {
+        match self {
+            Self::Standard => format!("_{context}.bedGraph"),
+            Self::Fraction => format!("_{context}.meth.bedGraph"),
+            Self::Counts => format!("_{context}.counts.bedGraph"),
+            Self::Logit => format!("_{context}.logit.bedGraph"),
+            Self::MethylKit => format!("_{context}.methylKit"),
+        }
+    }
+
+    fn write_header(self, writer: &mut fs::File, prefix: &Path, context: &str) -> Result<()> {
+        if matches!(self, Self::MethylKit) {
+            writeln!(writer, "chrBase\tchr\tbase\tstrand\tcoverage\tfreqC\tfreqT")
+                .map_err(RsomicsError::Io)
+        } else {
+            let description = match self {
+                Self::Standard => "methylation levels",
+                Self::Fraction => "methylation fractions",
+                Self::Counts => "methylation counts",
+                Self::Logit => "logit transformed methylation fractions",
+                Self::MethylKit => unreachable!(),
+            };
+            writeln!(
+                writer,
+                "track type=\"bedGraph\" description=\"{} {context} {description}\"",
+                prefix.display()
+            )
+            .map_err(RsomicsError::Io)
+        }
+    }
+
+    fn write_metric(self, writer: &mut fs::File, metric: &SiteMetric) -> Result<()> {
+        let depth = metric.depth();
+        let fraction = metric.methylated() as f64 / depth as f64;
+        match self {
+            Self::Standard => writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                metric.chromosome(),
+                metric.start(),
+                metric.end(),
+                metric.percentage(),
+                metric.methylated(),
+                metric.unmethylated()
+            ),
+            Self::Fraction => writeln!(
+                writer,
+                "{}\t{}\t{}\t{fraction:.6}",
+                metric.chromosome(),
+                metric.start(),
+                metric.end()
+            ),
+            Self::Counts => writeln!(
+                writer,
+                "{}\t{}\t{}\t{depth}",
+                metric.chromosome(),
+                metric.start(),
+                metric.end()
+            ),
+            Self::Logit => writeln!(
+                writer,
+                "{}\t{}\t{}\t{:.6}",
+                metric.chromosome(),
+                metric.start(),
+                metric.end(),
+                fraction.ln() - (-fraction).ln_1p()
+            ),
+            Self::MethylKit => {
+                let position = metric.end();
+                let strand = match metric.strand() {
+                    ReferenceStrand::Forward => 'F',
+                    ReferenceStrand::Reverse => 'R',
+                };
+                writeln!(
+                    writer,
+                    "{0}.{1}\t{0}\t{1}\t{strand}\t{depth}\t{2:6.2}\t{3:6.2}",
+                    metric.chromosome(),
+                    position,
+                    fraction * 100.0,
+                    (1.0 - fraction) * 100.0
+                )
+            }
+        }
+        .map_err(RsomicsError::Io)
+    }
+}
+
+fn context_path(prefix: &Path, context: &str, format: ExtractFormat) -> PathBuf {
     let mut path = OsString::from(prefix.as_os_str());
-    path.push(format!("_{context}.bedGraph"));
+    path.push(format.suffix(context));
     PathBuf::from(path)
 }
 
@@ -301,12 +378,13 @@ mod tests {
     fn later_commit_failure_restores_an_earlier_output() {
         let directory = tempfile::tempdir().unwrap();
         let prefix = directory.path().join("result");
-        let first = context_path(&prefix, "CpG");
+        let first = context_path(&prefix, "CpG", ExtractFormat::Standard);
         fs::write(&first, b"old\n").unwrap();
         let mut outputs = ContextOutputs::new(
             &prefix,
             Path::new("input.bam"),
             Path::new("reference.fa"),
+            ExtractFormat::Standard,
             &ExtractOptions {
                 chg: true,
                 ..ExtractOptions::default()
@@ -316,7 +394,7 @@ mod tests {
         for entry in &mut outputs.entries {
             entry.file().write_all(b"new\n").unwrap();
         }
-        let second = context_path(&prefix, "CHG");
+        let second = context_path(&prefix, "CHG", ExtractFormat::Standard);
         fs::create_dir(&second).unwrap();
 
         assert!(outputs.commit().is_err());
