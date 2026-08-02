@@ -11,10 +11,12 @@ use crate::context::SequenceContext;
 use crate::reference::IndexedReference;
 use crate::selection::{alignment_records, resolve_region};
 use crate::strand::BisulfiteStrand;
+use crate::trimming::TrimmingOptions;
 
 #[derive(Clone, Debug)]
 pub struct MbiasOptions {
     pub region: Option<Region>,
+    pub trimming: TrimmingOptions,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
     pub ignore_flags: u16,
@@ -32,6 +34,7 @@ impl Default for MbiasOptions {
     fn default() -> Self {
         Self {
             region: None,
+            trimming: TrimmingOptions::default(),
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
             ignore_flags: 0x0f00,
@@ -192,12 +195,20 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
             stats.filtered_records = increment(stats.filtered_records, "filtered record")?;
             continue;
         }
+        let sequence_length = u64::try_from(record.sequence_len())
+            .map_err(|error| RsomicsError::InvalidInput(error.to_string()))?;
         caller.visit(&record, |call| {
             if selection.as_ref().is_some_and(|selection| {
                 !selection
                     .range
                     .contains(call.reference_id, call.reference_position)
             }) || !includes(&options, call.context)
+                || !options.trimming.includes(
+                    call.strand,
+                    call.read,
+                    sequence_length,
+                    call.query_position,
+                )?
             {
                 return Ok(());
             }

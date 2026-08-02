@@ -12,13 +12,15 @@ merging, and per-alignment CpG metrics. Standard counts, fractions, total
 depth, logit, and methylKit representations are available. Complementary CpG
 and CHG strand calls can be merged before minimum-depth filtering. Indexed
 1-based inclusive region selection is shared by extraction, M-bias, and
-per-read reporting.
-Cytosine-report, BED selection, trimming, conversion, and variant surfaces
-remain absent until their full behavior and compatibility gates are implemented.
+per-read reporting. Extraction and M-bias share strand- and read-specific
+inclusion bounds and fixed-end trimming. Cytosine-report, BED selection,
+conversion, and variant surfaces remain absent until their full behavior and
+compatibility gates are implemented.
 
 ```console
 rsomics-methyl extract reference.fa alignments.bam --output-prefix sample --region chr1:1-1000000
 rsomics-methyl mbias reference.fa alignments.bam --output-prefix sample
+rsomics-methyl extract reference.fa alignments.bam --output-prefix trimmed --OT 5,100,1,96
 rsomics-methyl merge-context reference.fa sample_CpG.bedGraph --output merged.bedGraph
 rsomics-methyl per-read reference.fa alignments.bam --output reads.tsv
 ```

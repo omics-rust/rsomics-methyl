@@ -7,10 +7,12 @@ use rsomics_common::{Result, RsomicsError};
 use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
 
 use crate::alignment::{AlignmentFilter, DUPLICATE};
+use crate::calling::read_number;
 use crate::context::{ReferenceStrand, SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
 use crate::selection::{AlignmentRecordResult, ReferenceRange, alignment_records, resolve_region};
 use crate::strand::{BisulfiteStrand, bisulfite_strand};
+use crate::trimming::TrimmingOptions;
 
 const PAIRED: u16 = 0x1;
 const MATE_UNMAPPED: u16 = 0x8;
@@ -18,6 +20,7 @@ const MATE_UNMAPPED: u16 = 0x8;
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
     pub region: Option<Region>,
+    pub trimming: TrimmingOptions,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
     pub ignore_flags: u16,
@@ -36,6 +39,7 @@ impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
             region: None,
+            trimming: TrimmingOptions::default(),
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
             ignore_flags: 0x0f00,
@@ -150,6 +154,15 @@ impl Extractor {
                 continue;
             }
             let record = entry.record();
+            let strand = bisulfite_strand(record)?;
+            if !self.options.trimming.includes(
+                strand,
+                read_number(record),
+                u64::try_from(record.sequence_len()).map_err(invalid_coordinate)?,
+                u64::try_from(projection.qpos).map_err(invalid_coordinate)?,
+            )? {
+                continue;
+            }
             let quality = record
                 .quality_scores()
                 .get(projection.qpos)
@@ -159,7 +172,7 @@ impl Extractor {
                 record,
                 base: record.seq_nibble(projection.qpos),
                 quality,
-                strand: bisulfite_strand(record)?,
+                strand,
             });
         }
         adjust_overlaps(&mut evidence);

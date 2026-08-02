@@ -11,6 +11,7 @@ use rsomics_methyl::extract::ExtractOptions;
 use rsomics_methyl::mbias::MbiasOptions;
 use rsomics_methyl::merge_context::{MergeContextStats, merge_context};
 use rsomics_methyl::per_read::{PerReadMetric, PerReadOptions, per_read};
+use rsomics_methyl::{BisulfiteStrand, ReadBounds, TrimmingOptions};
 use serde::Serialize;
 
 use crate::extract_output::extract_to_standard_outputs;
@@ -128,6 +129,71 @@ struct PileupFilterArgs {
     /// Include CHH metrics.
     #[arg(long)]
     chh: bool,
+
+    #[command(flatten)]
+    trimming: TrimmingArgs,
+}
+
+#[derive(Debug, Args)]
+struct TrimmingArgs {
+    /// Inclusive 1-based read 1 start,end and read 2 start,end for OT calls.
+    #[arg(long, visible_alias = "OT", value_name = "A,B,C,D")]
+    ot: Option<ReadBounds>,
+
+    /// Inclusive 1-based read bounds for OB calls.
+    #[arg(long, visible_alias = "OB", value_name = "A,B,C,D")]
+    ob: Option<ReadBounds>,
+
+    /// Inclusive 1-based read bounds for CTOT calls.
+    #[arg(long, visible_alias = "CTOT", value_name = "A,B,C,D")]
+    ctot: Option<ReadBounds>,
+
+    /// Inclusive 1-based read bounds for CTOB calls.
+    #[arg(long, visible_alias = "CTOB", value_name = "A,B,C,D")]
+    ctob: Option<ReadBounds>,
+
+    /// Fixed counts removed from the left,right ends of OT read 1 and read 2.
+    #[arg(long = "trim-ot", visible_alias = "nOT", value_name = "A,B,C,D")]
+    trim_ot: Option<ReadBounds>,
+
+    /// Fixed end-removal counts for OB calls.
+    #[arg(long = "trim-ob", visible_alias = "nOB", value_name = "A,B,C,D")]
+    trim_ob: Option<ReadBounds>,
+
+    /// Fixed end-removal counts for CTOT calls.
+    #[arg(long = "trim-ctot", visible_alias = "nCTOT", value_name = "A,B,C,D")]
+    trim_ctot: Option<ReadBounds>,
+
+    /// Fixed end-removal counts for CTOB calls.
+    #[arg(long = "trim-ctob", visible_alias = "nCTOB", value_name = "A,B,C,D")]
+    trim_ctob: Option<ReadBounds>,
+}
+
+impl TrimmingArgs {
+    fn options(&self) -> Result<TrimmingOptions> {
+        let mut options = TrimmingOptions::default();
+        for (strand, bounds) in [
+            (BisulfiteStrand::Ot, self.ot),
+            (BisulfiteStrand::Ob, self.ob),
+            (BisulfiteStrand::Ctot, self.ctot),
+            (BisulfiteStrand::Ctob, self.ctob),
+        ] {
+            if let Some(bounds) = bounds {
+                options.set_inclusion(strand, bounds)?;
+            }
+        }
+        for (strand, bounds) in [
+            (BisulfiteStrand::Ot, self.trim_ot),
+            (BisulfiteStrand::Ob, self.trim_ob),
+            (BisulfiteStrand::Ctot, self.trim_ctot),
+            (BisulfiteStrand::Ctob, self.trim_ctob),
+        ] {
+            if let Some(bounds) = bounds {
+                options.set_fixed_ends(strand, bounds);
+            }
+        }
+        Ok(options)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -291,8 +357,10 @@ fn write_per_read(writer: &mut dyn Write, metric: &PerReadMetric) -> Result<()> 
 
 fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
     let filters = args.filters;
+    let trimming = filters.trimming.options()?;
     let options = ExtractOptions {
         region: args.region,
+        trimming,
         minimum_mapping_quality: filters.minimum_mapping_quality,
         minimum_base_quality: filters.minimum_base_quality,
         ignore_flags: filters.ignore_flags,
@@ -330,12 +398,14 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
 
 fn execute_mbias(args: MbiasArgs) -> Result<ExecutionReport> {
     let filters = args.filters;
+    let trimming = filters.trimming.options()?;
     let result = mbias_to_outputs(
         &args.input,
         &args.reference,
         &args.output_prefix,
         MbiasOptions {
             region: args.region,
+            trimming,
             minimum_mapping_quality: filters.minimum_mapping_quality,
             minimum_base_quality: filters.minimum_base_quality,
             ignore_flags: filters.ignore_flags,

@@ -56,7 +56,7 @@ impl AlignmentCaller {
         let start = usize::try_from(record.alignment_start())
             .map_err(|error| invalid_record(record, error))?;
         let strand = bisulfite_strand(record)?;
-        let read = if record.flags() & READ_2 == 0 { 1 } else { 2 };
+        let read = read_number(record);
         let mut query_position = 0usize;
         let mut reference_position = start;
         for (kind, raw_length) in record.decoded_cigar()? {
@@ -133,6 +133,10 @@ impl AlignmentCaller {
             start: u64::try_from(start).map_err(|error| invalid_record(record, error))?,
         })
     }
+}
+
+pub(crate) fn read_number(record: &RawRecord) -> u8 {
+    if record.flags() & READ_2 == 0 { 1 } else { 2 }
 }
 
 fn methylation_state(strand: BisulfiteStrand, base: u8) -> Option<bool> {

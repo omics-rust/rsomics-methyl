@@ -79,6 +79,92 @@ fn extract_region_bounds_the_reported_sites() {
 }
 
 #[test]
+fn inclusion_bounds_are_one_based_inclusive_and_accept_zero_sentinels() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("inclusion");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+            "--OT",
+            "5,0,0,0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let observed =
+        std::fs::read_to_string(directory.path().join("inclusion_CpG.bedGraph")).unwrap();
+    assert!(!observed.contains("chrSynthetic\t1\t2\t"));
+    assert!(observed.contains("chrSynthetic\t4\t5\t33\t1\t2\n"));
+}
+
+#[test]
+fn fixed_end_trimming_matches_live_methyldackel_goldens() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+
+    let extract_prefix = directory.path().join("extract");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            extract_prefix.to_str().unwrap(),
+            "--nOT",
+            "5,1,1,1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let observed = std::fs::read_to_string(directory.path().join("extract_CpG.bedGraph"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        format!("{observed}\n"),
+        std::fs::read_to_string(fixture.join("expected.trim-fixed.bedGraph")).unwrap()
+    );
+
+    let mbias_prefix = directory.path().join("mbias");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "mbias",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            mbias_prefix.to_str().unwrap(),
+            "--nOT",
+            "5,1,1,1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("mbias_mbias.tsv")).unwrap(),
+        std::fs::read(fixture.join("expected.trim-fixed.mbias.tsv")).unwrap()
+    );
+}
+
+#[test]
 fn alternative_extract_formats_match_methyldackel_goldens() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();

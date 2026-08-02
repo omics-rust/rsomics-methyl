@@ -11,6 +11,8 @@ pub mod per_read;
 mod reference;
 mod selection;
 mod strand;
+mod trimming;
 
 pub use context::{ReferenceStrand, SequenceContext};
 pub use strand::BisulfiteStrand;
+pub use trimming::{ReadBounds, TrimmingOptions};
