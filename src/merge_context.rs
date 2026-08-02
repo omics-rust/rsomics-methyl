@@ -1,15 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
 use std::io::{BufRead, Write};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use noodles::core::{Position, Region};
-use noodles::fasta;
 use rsomics_common::{Result, RsomicsError};
 
+use crate::reference::IndexedReference;
+
 const MAX_LINE_LENGTH: usize = 1024 * 1024;
-const REFERENCE_CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MergeContextStats {
@@ -60,117 +58,47 @@ impl Metric {
     }
 }
 
-struct ReferenceCache {
-    reader: fasta::io::IndexedReader<fasta::io::BufReader<File>>,
-    path: PathBuf,
-    chromosome: Vec<u8>,
-    sequence_start: usize,
-    sequence: Vec<u8>,
-}
-
-impl ReferenceCache {
-    fn open(path: &Path) -> Result<Self> {
-        let reader = fasta::io::indexed_reader::Builder::default()
-            .build_from_path(path)
-            .map_err(|error| reference_error(path, error))?;
-        Ok(Self {
-            reader,
-            path: path.to_path_buf(),
-            chromosome: Vec::new(),
-            sequence_start: 0,
-            sequence: Vec::new(),
-        })
+fn context_span(
+    reference: &mut IndexedReference,
+    chromosome: &str,
+    position: u64,
+) -> Result<Range<u64>> {
+    let length = reference.length(chromosome)?;
+    if position >= length {
+        return Err(reference.error(format!(
+            "{chromosome}:{position} is outside reference length {length}"
+        )));
     }
-
-    fn context_span(&mut self, chromosome: &str, position: u64) -> Result<Range<u64>> {
-        let length = self.length(chromosome)?;
-        if position >= length {
-            return Err(reference_error(
-                &self.path,
-                format!("{chromosome}:{position} is outside reference length {length}"),
-            ));
+    let position = usize::try_from(position).map_err(|error| reference.error(error))?;
+    let length = usize::try_from(length).map_err(|error| reference.error(error))?;
+    let start = position.saturating_sub(2);
+    let end = position.saturating_add(3).min(length);
+    let offset = position - start;
+    let sequence = reference.sequence(chromosome, start..end)?;
+    match sequence[offset].to_ascii_uppercase() {
+        b'C' if sequence
+            .get(offset + 1)
+            .is_some_and(|base| base.eq_ignore_ascii_case(&b'G')) =>
+        {
+            Ok(position as u64..position as u64 + 2)
         }
-        let position =
-            usize::try_from(position).map_err(|error| reference_error(&self.path, error))?;
-        let length = usize::try_from(length).map_err(|error| reference_error(&self.path, error))?;
-        let start = position.saturating_sub(2);
-        let end = position.saturating_add(3).min(length);
-        let offset = position - start;
-        let sequence = self.sequence(chromosome, start..end)?;
-        match sequence[offset].to_ascii_uppercase() {
-            b'C' if sequence
-                .get(offset + 1)
-                .is_some_and(|base| base.eq_ignore_ascii_case(&b'G')) =>
-            {
-                Ok(position as u64..position as u64 + 2)
-            }
-            b'C' if sequence
-                .get(offset + 2)
-                .is_some_and(|base| base.eq_ignore_ascii_case(&b'G')) =>
-            {
-                Ok(position as u64..position as u64 + 3)
-            }
-            b'G' if offset >= 1 && sequence[offset - 1].eq_ignore_ascii_case(&b'C') => {
-                Ok(position as u64 - 1..position as u64 + 1)
-            }
-            b'G' if offset >= 2 && sequence[offset - 2].eq_ignore_ascii_case(&b'C') => {
-                Ok(position as u64 - 2..position as u64 + 1)
-            }
-            b'C' | b'G' => Ok(position as u64..position as u64 + 1),
-            base => Err(reference_error(
-                &self.path,
-                format!(
-                    "metric at {chromosome}:{position} targets reference base {} instead of C or G",
-                    char::from(base)
-                ),
-            )),
+        b'C' if sequence
+            .get(offset + 2)
+            .is_some_and(|base| base.eq_ignore_ascii_case(&b'G')) =>
+        {
+            Ok(position as u64..position as u64 + 3)
         }
-    }
-
-    fn length(&self, chromosome: &str) -> Result<u64> {
-        self.reader
-            .index()
-            .as_ref()
-            .iter()
-            .find(|record| record.name() == chromosome.as_bytes())
-            .map(fasta::fai::Record::length)
-            .ok_or_else(|| reference_error(&self.path, format!("unknown chromosome {chromosome}")))
-    }
-
-    fn sequence(&mut self, chromosome: &str, range: Range<usize>) -> Result<&[u8]> {
-        let needs_fetch = self.chromosome != chromosome.as_bytes()
-            || range.start < self.sequence_start
-            || range.end > self.sequence_start + self.sequence.len();
-        if needs_fetch {
-            let length = usize::try_from(self.length(chromosome)?)
-                .map_err(|error| reference_error(&self.path, error))?;
-            let start = range.start / REFERENCE_CHUNK_SIZE * REFERENCE_CHUNK_SIZE;
-            let end = start
-                .checked_add(REFERENCE_CHUNK_SIZE)
-                .map_or(length, |value| value.min(length))
-                .max(range.end);
-            let interval_start = Position::try_from(start + 1)
-                .map_err(|error| reference_error(&self.path, error))?;
-            let interval_end =
-                Position::try_from(end).map_err(|error| reference_error(&self.path, error))?;
-            let record = self
-                .reader
-                .query(&Region::new(
-                    chromosome.as_bytes().to_vec(),
-                    interval_start..=interval_end,
-                ))
-                .map_err(|error| reference_error(&self.path, error))?;
-            self.chromosome.clear();
-            self.chromosome.extend_from_slice(chromosome.as_bytes());
-            self.sequence_start = start;
-            self.sequence.clear();
-            self.sequence.extend_from_slice(record.sequence().as_ref());
+        b'G' if offset >= 1 && sequence[offset - 1].eq_ignore_ascii_case(&b'C') => {
+            Ok(position as u64 - 1..position as u64 + 1)
         }
-        let start = range.start - self.sequence_start;
-        let end = range.end - self.sequence_start;
-        self.sequence
-            .get(start..end)
-            .ok_or_else(|| reference_error(&self.path, "reference cache range is invalid"))
+        b'G' if offset >= 2 && sequence[offset - 2].eq_ignore_ascii_case(&b'C') => {
+            Ok(position as u64 - 2..position as u64 + 1)
+        }
+        b'C' | b'G' => Ok(position as u64..position as u64 + 1),
+        base => Err(reference.error(format!(
+            "metric at {chromosome}:{position} targets reference base {} instead of C or G",
+            char::from(base)
+        ))),
     }
 }
 
@@ -179,7 +107,7 @@ pub fn merge_context(
     output: &mut dyn Write,
     reference: &Path,
 ) -> Result<MergeContextStats> {
-    let mut reference = ReferenceCache::open(reference)?;
+    let mut reference = IndexedReference::open(reference)?;
     let mut stats = MergeContextStats::default();
     let mut pending = BTreeMap::<(u64, u64), Metric>::new();
     let mut seen_chromosomes = HashSet::new();
@@ -230,7 +158,7 @@ pub fn merge_context(
             ));
         }
         last_start = Some(metric.start);
-        let span = reference.context_span(&metric.chromosome, metric.start)?;
+        let span = context_span(&mut reference, &metric.chromosome, metric.start)?;
         metric.start = span.start;
         metric.end = span.end;
         stats.input_records = stats
@@ -350,13 +278,6 @@ fn write_metric(
 
 fn line_error(line_number: u64, message: impl std::fmt::Display) -> RsomicsError {
     RsomicsError::InvalidInput(format!("line {line_number}: {message}"))
-}
-
-fn reference_error(path: &Path, error: impl std::fmt::Display) -> RsomicsError {
-    RsomicsError::InvalidInput(format!(
-        "reading indexed reference {}: {error}",
-        path.display()
-    ))
 }
 
 #[cfg(test)]
