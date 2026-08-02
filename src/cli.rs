@@ -8,11 +8,13 @@ use rsomics_common::{
     OutputArgs, Result, RsomicsError, ToolMeta, reject_output_alias, write_output,
 };
 use rsomics_methyl::extract::ExtractOptions;
+use rsomics_methyl::mbias::MbiasOptions;
 use rsomics_methyl::merge_context::{MergeContextStats, merge_context};
 use rsomics_methyl::per_read::{PerReadMetric, PerReadOptions, per_read};
 use serde::Serialize;
 
 use crate::extract_output::extract_to_standard_outputs;
+use crate::mbias_output::mbias_to_outputs;
 
 pub const META: ToolMeta = ToolMeta {
     name: env!("CARGO_PKG_NAME"),
@@ -42,6 +44,9 @@ enum Command {
     /// Merge strand-specific CpG and CHG cytosine metrics.
     MergeContext(MergeContextArgs),
 
+    /// Report methylation bias by read position and bisulfite strand.
+    Mbias(MbiasArgs),
+
     /// Report CpG methylation evidence for each alignment record.
     PerRead(PerReadArgs),
 }
@@ -62,6 +67,9 @@ struct ExtractArgs {
     #[arg(short, long)]
     output_prefix: PathBuf,
 
+    #[command(flatten)]
+    filters: PileupFilterArgs,
+
     /// Output representation.
     #[arg(long, value_enum, default_value = "standard")]
     format: ExtractFormat,
@@ -70,6 +78,13 @@ struct ExtractArgs {
     #[arg(long)]
     merge_context: bool,
 
+    /// Minimum methylated plus unmethylated depth.
+    #[arg(short = 'd', long, default_value_t = 1)]
+    minimum_depth: u64,
+}
+
+#[derive(Debug, Args)]
+struct PileupFilterArgs {
     /// Minimum alignment mapping quality.
     #[arg(short = 'q', long, default_value_t = 10)]
     minimum_mapping_quality: u8,
@@ -77,10 +92,6 @@ struct ExtractArgs {
     /// Minimum base quality; must be positive.
     #[arg(short = 'p', long, default_value_t = 5)]
     minimum_base_quality: u8,
-
-    /// Minimum methylated plus unmethylated depth.
-    #[arg(short = 'd', long, default_value_t = 1)]
-    minimum_depth: u64,
 
     /// SAM flag bits that exclude a record when any are set.
     #[arg(short = 'F', long, default_value_t = 0x0f00)]
@@ -106,17 +117,37 @@ struct ExtractArgs {
     #[arg(long)]
     ignore_nh: bool,
 
-    /// Disable CpG output.
+    /// Disable CpG metrics.
     #[arg(long)]
     no_cpg: bool,
 
-    /// Emit CHG output.
+    /// Include CHG metrics.
     #[arg(long)]
     chg: bool,
 
-    /// Emit CHH output.
+    /// Include CHH metrics.
     #[arg(long)]
     chh: bool,
+}
+
+#[derive(Debug, Args)]
+struct MbiasArgs {
+    /// Indexed reference FASTA.
+    reference: PathBuf,
+
+    /// Coordinate-sorted indexed BAM or CRAM.
+    input: PathBuf,
+
+    /// Prefix for the transactional TSV and strand-specific SVG outputs.
+    #[arg(short, long)]
+    output_prefix: PathBuf,
+
+    /// Reference region using 1-based inclusive coordinates.
+    #[arg(short = 'r', long)]
+    region: Option<Region>,
+
+    #[command(flatten)]
+    filters: PileupFilterArgs,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -192,6 +223,7 @@ impl Cli {
     pub fn execute(self) -> Result<ExecutionReport> {
         match self.command {
             Command::Extract(args) => execute_extract(args),
+            Command::Mbias(args) => execute_mbias(args),
             Command::MergeContext(args) => execute_merge_context(args, self.output.json),
             Command::PerRead(args) => execute_per_read(args, self.output.json),
         }
@@ -258,20 +290,21 @@ fn write_per_read(writer: &mut dyn Write, metric: &PerReadMetric) -> Result<()> 
 }
 
 fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
+    let filters = args.filters;
     let options = ExtractOptions {
         region: args.region,
-        minimum_mapping_quality: args.minimum_mapping_quality,
-        minimum_base_quality: args.minimum_base_quality,
-        ignore_flags: args.ignore_flags,
-        require_flags: args.require_flags,
-        keep_duplicates: args.keep_duplicates,
-        keep_singletons: args.keep_singletons,
-        keep_discordant: args.keep_discordant,
-        ignore_nh: args.ignore_nh,
+        minimum_mapping_quality: filters.minimum_mapping_quality,
+        minimum_base_quality: filters.minimum_base_quality,
+        ignore_flags: filters.ignore_flags,
+        require_flags: filters.require_flags,
+        keep_duplicates: filters.keep_duplicates,
+        keep_singletons: filters.keep_singletons,
+        keep_discordant: filters.keep_discordant,
+        ignore_nh: filters.ignore_nh,
         minimum_depth: args.minimum_depth,
-        cpg: !args.no_cpg,
-        chg: args.chg,
-        chh: args.chh,
+        cpg: !filters.no_cpg,
+        chg: filters.chg,
+        chh: filters.chh,
     };
     let result = extract_to_standard_outputs(
         &args.input,
@@ -287,6 +320,41 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         output_records: result.output_records,
         filtered_records: result.stats.filtered_records,
         merged_records: result.merged_records,
+        outputs: result
+            .outputs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    })
+}
+
+fn execute_mbias(args: MbiasArgs) -> Result<ExecutionReport> {
+    let filters = args.filters;
+    let result = mbias_to_outputs(
+        &args.input,
+        &args.reference,
+        &args.output_prefix,
+        MbiasOptions {
+            region: args.region,
+            minimum_mapping_quality: filters.minimum_mapping_quality,
+            minimum_base_quality: filters.minimum_base_quality,
+            ignore_flags: filters.ignore_flags,
+            require_flags: filters.require_flags,
+            keep_duplicates: filters.keep_duplicates,
+            keep_singletons: filters.keep_singletons,
+            keep_discordant: filters.keep_discordant,
+            ignore_nh: filters.ignore_nh,
+            cpg: !filters.no_cpg,
+            chg: filters.chg,
+            chh: filters.chh,
+        },
+    )?;
+    Ok(ExecutionReport {
+        operation: "mbias",
+        input_records: result.stats.input_records,
+        output_records: result.metrics,
+        filtered_records: result.stats.filtered_records,
+        merged_records: 0,
         outputs: result
             .outputs
             .iter()

@@ -4,12 +4,11 @@ use noodles::core::Region;
 use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
 use rsomics_common::{Result, RsomicsError};
 
-use crate::ReferenceStrand;
 use crate::alignment::{AlignmentFilter, invalid_record};
-use crate::context::{SequenceContext, classify};
-use crate::reference::{IndexedReference, ReferenceSequence};
+use crate::calling::AlignmentCaller;
+use crate::context::SequenceContext;
+use crate::reference::IndexedReference;
 use crate::selection::{AlignmentRecordResult, alignment_records, resolve_region};
-use crate::strand::bisulfite_strand;
 
 #[derive(Clone, Debug)]
 pub struct PerReadOptions {
@@ -117,9 +116,7 @@ pub fn per_read(
         reject_multimappers: !options.ignore_nh,
     };
     let mut caller = PerReadCaller {
-        reference: indexed_reference,
-        references,
-        minimum_base_quality: options.minimum_base_quality,
+        calls: AlignmentCaller::new(indexed_reference, references, options.minimum_base_quality),
     };
     let mut encoder = RawRecordEncoder::new();
     let mut stats = PerReadStats::default();
@@ -153,108 +150,33 @@ pub fn per_read(
 }
 
 struct PerReadCaller {
-    reference: IndexedReference,
-    references: Vec<ReferenceSequence>,
-    minimum_base_quality: u8,
+    calls: AlignmentCaller,
 }
 
 impl PerReadCaller {
     fn metric(&mut self, record: &RawRecord) -> Result<PerReadMetric> {
-        let reference_id = usize::try_from(record.reference_sequence_id())
-            .map_err(|error| invalid_record(record, error))?;
-        let reference = self.references.get(reference_id).ok_or_else(|| {
-            invalid_record(record, format!("reference ID {reference_id} is absent"))
-        })?;
-        let start = usize::try_from(record.alignment_start())
-            .map_err(|error| invalid_record(record, error))?;
-        let strand = bisulfite_strand(record)?;
-        let mut query_position = 0usize;
-        let mut reference_position = start;
         let mut methylated = 0u64;
         let mut unmethylated = 0u64;
-        for (kind, raw_length) in record.decoded_cigar()? {
-            let length =
-                usize::try_from(raw_length).map_err(|error| invalid_record(record, error))?;
-            match kind {
-                0 | 7 | 8 => {
-                    for _ in 0..length {
-                        if query_position >= record.sequence_len() {
-                            return Err(invalid_record(
-                                record,
-                                "CIGAR consumes beyond the sequence",
-                            ));
-                        }
-                        let quality = record
-                            .quality_scores()
-                            .get(query_position)
-                            .copied()
-                            .unwrap_or(u8::MAX);
-                        if quality >= self.minimum_base_quality
-                            && let Some(context) =
-                                classify(&mut self.reference, &reference.name, reference_position)?
-                            && context.kind == SequenceContext::Cpg
-                            && strand.is_top() == (context.strand == ReferenceStrand::Forward)
-                        {
-                            match (strand.is_top(), record.seq_nibble(query_position)) {
-                                (true, 2) | (false, 4) => {
-                                    methylated = checked_increment(methylated, "methylated count")?;
-                                }
-                                (true, 8) | (false, 1) => {
-                                    unmethylated =
-                                        checked_increment(unmethylated, "unmethylated count")?;
-                                }
-                                _ => {}
-                            }
-                        }
-                        query_position = checked_advance(query_position, 1, record)?;
-                        reference_position = checked_advance(reference_position, 1, record)?;
-                    }
-                }
-                1 | 4 => {
-                    query_position = checked_advance(query_position, length, record)?;
-                }
-                2 | 3 => {
-                    reference_position = checked_advance(reference_position, length, record)?;
-                }
-                5 | 6 => {}
-                _ => {
-                    return Err(invalid_record(
-                        record,
-                        format!("unsupported CIGAR operation {kind}"),
-                    ));
+        let location = self.calls.visit(record, |call| {
+            if call.context == SequenceContext::Cpg {
+                if call.methylated {
+                    methylated = checked_increment(methylated, "methylated count")?;
+                } else {
+                    unmethylated = checked_increment(unmethylated, "unmethylated count")?;
                 }
             }
-        }
-        if query_position != record.sequence_len() {
-            return Err(invalid_record(
-                record,
-                format!(
-                    "CIGAR consumes {query_position} query bases instead of {}",
-                    record.sequence_len()
-                ),
-            ));
-        }
-        let reference_length =
-            usize::try_from(reference.length).map_err(|error| invalid_record(record, error))?;
-        if reference_position > reference_length {
-            return Err(invalid_record(record, "CIGAR extends beyond the reference"));
-        }
+            Ok(())
+        })?;
         let name = String::from_utf8(record.name().to_vec())
             .map_err(|_| invalid_record(record, "read name is not UTF-8"))?;
         Ok(PerReadMetric {
             name,
-            chromosome: reference.name.clone(),
-            start: u64::try_from(start).map_err(|error| invalid_record(record, error))?,
+            chromosome: location.chromosome,
+            start: location.start,
             methylated,
             unmethylated,
         })
     }
-}
-
-fn checked_advance(position: usize, length: usize, record: &RawRecord) -> Result<usize> {
-    position
-        .checked_add(length)
-        .ok_or_else(|| invalid_record(record, "CIGAR coordinate overflows"))
 }
 
 fn checked_increment(value: u64, field: &str) -> Result<u64> {
@@ -330,12 +252,14 @@ mod tests {
         )
         .unwrap();
         let caller = PerReadCaller {
-            reference: IndexedReference::open(&path).unwrap(),
-            references: vec![ReferenceSequence {
-                name: "chr1".into(),
-                length: sequence.len() as u64,
-            }],
-            minimum_base_quality: PerReadOptions::default().minimum_base_quality,
+            calls: AlignmentCaller::new(
+                IndexedReference::open(&path).unwrap(),
+                vec![crate::reference::ReferenceSequence {
+                    name: "chr1".into(),
+                    length: sequence.len() as u64,
+                }],
+                PerReadOptions::default().minimum_base_quality,
+            ),
         };
         (directory, caller)
     }

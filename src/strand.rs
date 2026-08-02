@@ -8,8 +8,8 @@ const REVERSE: u16 = 0x10;
 const READ_1: u16 = 0x40;
 const READ_2: u16 = 0x80;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BisulfiteStrand {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BisulfiteStrand {
     Ot,
     Ob,
     Ctot,
@@ -19,6 +19,15 @@ pub(crate) enum BisulfiteStrand {
 impl BisulfiteStrand {
     pub(crate) fn is_top(self) -> bool {
         matches!(self, Self::Ot | Self::Ctot)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ot => "OT",
+            Self::Ob => "OB",
+            Self::Ctot => "CTOT",
+            Self::Ctob => "CTOB",
+        }
     }
 }
 

@@ -252,6 +252,64 @@ fn per_read_matches_the_documented_methyldackel_contract() {
 }
 
 #[test]
+fn mbias_cli_matches_metrics_and_suggestions_from_methyldackel() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("result");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "mbias",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("result_mbias.tsv")).unwrap(),
+        std::fs::read(fixture.join("expected.mbias.tsv")).unwrap()
+    );
+    for (strand, suggestion) in [("OT", "--OT 0,0,0,0"), ("OB", "--OB 0,0,0,0")] {
+        let svg =
+            std::fs::read_to_string(directory.path().join(format!("result_{strand}.svg"))).unwrap();
+        assert!(svg.contains(&format!("<title>{strand} M-bias</title>")));
+        assert!(svg.contains("id=\"read-1\""));
+        assert!(svg.contains(suggestion));
+        assert!(svg.ends_with("</svg>\n"));
+    }
+}
+
+#[test]
+fn failed_mbias_preserves_every_existing_output() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("result");
+    let table = directory.path().join("result_mbias.tsv");
+    let svg = directory.path().join("result_OT.svg");
+    std::fs::write(&table, b"keep\n").unwrap();
+    std::fs::create_dir(&svg).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "mbias",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(table).unwrap(), b"keep\n");
+    assert!(svg.is_dir());
+}
+
+#[test]
 fn per_read_region_requires_the_alignment_start_inside_the_interval() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();
