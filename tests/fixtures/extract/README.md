@@ -8,4 +8,6 @@ path-dependent headers. Forward and reverse-strand calls also exercise merged
 context output and post-merge minimum-depth filtering. The fixed-end trimming
 goldens use `--nOT 5,1,1,1` against the same revision. Inclusion-bound tests
 follow its documented 1-based inclusive contract; the current upstream code
-incorrectly excludes the first requested position.
+incorrectly excludes the first requested position. Exhaustive cytosine-report
+goldens enable all three contexts; the zero-coverage variant uses `-q 61` to
+filter every alignment.

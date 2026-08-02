@@ -4,6 +4,10 @@ fn extract_fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extract")
 }
 
+fn cytosine_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cytosine-report")
+}
+
 #[test]
 fn extract_cli_matches_methyldackel_golden() {
     let fixture = extract_fixture();
@@ -165,6 +169,143 @@ fn fixed_end_trimming_matches_live_methyldackel_goldens() {
 }
 
 #[test]
+fn cytosine_reports_match_live_methyldackel_including_zero_coverage() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = fixture.join("synthetic.fa");
+    let input = fixture.join("synthetic.bam");
+
+    for (name, extra, expected) in [
+        (
+            "all",
+            vec!["--cytosine_report", "--chg", "--chh"],
+            "expected.cytosine-report.tsv",
+        ),
+        (
+            "zero",
+            vec!["--format", "cytosine-report", "--chg", "--chh", "-q", "61"],
+            "expected.cytosine-report.zero.tsv",
+        ),
+    ] {
+        let prefix = directory.path().join(name);
+        let mut arguments = vec![
+            "extract",
+            reference.to_str().unwrap(),
+            input.to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ];
+        arguments.extend(extra);
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read(format!("{}.cytosine_report.txt", prefix.display())).unwrap(),
+            std::fs::read(fixture.join(expected)).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn cytosine_report_covers_all_contexts_and_reference_boundaries() {
+    let fixture = cytosine_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("contexts");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("reference.fa").to_str().unwrap(),
+            fixture.join("empty.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+            "--cytosine-report",
+            "--chg",
+            "--chh",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read(format!("{}.cytosine_report.txt", prefix.display())).unwrap(),
+        std::fs::read(fixture.join("expected.tsv")).unwrap()
+    );
+}
+
+#[test]
+fn cytosine_report_region_is_exhaustive_only_inside_the_interval() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("region");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+            "--format",
+            "cytosine-report",
+            "--chg",
+            "--chh",
+            "--region",
+            "chrSynthetic:5-10",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let expected = std::fs::read_to_string(fixture.join("expected.cytosine-report.tsv"))
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let position = line.split('\t').nth(1).unwrap().parse::<u64>().unwrap();
+            (5..=10).contains(&position)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.cytosine_report.txt", prefix.display())).unwrap(),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn failed_cytosine_report_preserves_existing_output() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("report");
+    let output = directory.path().join("report.cytosine_report.txt");
+    std::fs::write(&output, b"keep\n").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            directory.path().join("missing.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+            "--cytosine-report",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(output).unwrap(), b"keep\n");
+}
+
+#[test]
 fn alternative_extract_formats_match_methyldackel_goldens() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();
@@ -282,6 +423,29 @@ fn methylkit_rejects_context_merging() {
             directory.path().join("result").to_str().unwrap(),
             "--format",
             "methyl-kit",
+            "--merge-context",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("cannot merge complementary contexts")
+    );
+}
+
+#[test]
+fn cytosine_report_rejects_context_merging() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            directory.path().join("result").to_str().unwrap(),
+            "--format",
+            "cytosine-report",
             "--merge-context",
         ])
         .output()

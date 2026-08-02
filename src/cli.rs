@@ -14,7 +14,7 @@ use rsomics_methyl::per_read::{PerReadMetric, PerReadOptions, per_read};
 use rsomics_methyl::{BisulfiteStrand, ReadBounds, TrimmingOptions};
 use serde::Serialize;
 
-use crate::extract_output::extract_to_standard_outputs;
+use crate::extract_output::extract_to_outputs;
 use crate::mbias_output::mbias_to_outputs;
 
 pub const META: ToolMeta = ToolMeta {
@@ -64,7 +64,7 @@ struct ExtractArgs {
     #[arg(short = 'r', long)]
     region: Option<Region>,
 
-    /// Prefix for transactional context-specific bedGraph outputs.
+    /// Prefix for transactional extraction outputs.
     #[arg(short, long)]
     output_prefix: PathBuf,
 
@@ -75,11 +75,15 @@ struct ExtractArgs {
     #[arg(long, value_enum, default_value = "standard")]
     format: ExtractFormat,
 
+    /// Write one exhaustive Bismark-style cytosine report.
+    #[arg(long, visible_alias = "cytosine_report", conflicts_with = "format")]
+    cytosine_report: bool,
+
     /// Combine complementary CpG and CHG strand calls.
     #[arg(long)]
     merge_context: bool,
 
-    /// Minimum methylated plus unmethylated depth.
+    /// Minimum methylated plus unmethylated depth; exhaustive reports include zero depth.
     #[arg(short = 'd', long, default_value_t = 1)]
     minimum_depth: u64,
 }
@@ -223,6 +227,7 @@ pub(crate) enum ExtractFormat {
     Counts,
     Logit,
     MethylKit,
+    CytosineReport,
 }
 
 #[derive(Debug, Args)]
@@ -358,6 +363,11 @@ fn write_per_read(writer: &mut dyn Write, metric: &PerReadMetric) -> Result<()> 
 fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
     let filters = args.filters;
     let trimming = filters.trimming.options()?;
+    let format = if args.cytosine_report {
+        ExtractFormat::CytosineReport
+    } else {
+        args.format
+    };
     let options = ExtractOptions {
         region: args.region,
         trimming,
@@ -374,11 +384,11 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         chg: filters.chg,
         chh: filters.chh,
     };
-    let result = extract_to_standard_outputs(
+    let result = extract_to_outputs(
         &args.input,
         &args.reference,
         &args.output_prefix,
-        args.format,
+        format,
         args.merge_context,
         options,
     )?;

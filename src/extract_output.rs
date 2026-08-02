@@ -5,7 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rsomics_common::{Result, RsomicsError, reject_output_alias};
-use rsomics_methyl::extract::{ExtractOptions, ExtractStats, SiteMetric, extract};
+use rsomics_methyl::extract::{
+    ExtractOptions, ExtractStats, SiteMetric, extract, extract_all_cytosines,
+};
 use rsomics_methyl::{ReferenceStrand, SequenceContext};
 
 use crate::cli::ExtractFormat;
@@ -18,7 +20,57 @@ pub struct ExtractOutputResult {
     pub outputs: Vec<PathBuf>,
 }
 
-pub fn extract_to_standard_outputs(
+struct CytosineReportOutput {
+    output: TransactionalOutput,
+    records: u64,
+}
+
+impl CytosineReportOutput {
+    fn new(prefix: &Path, input: &Path, reference: &Path) -> Result<Self> {
+        let path = cytosine_report_path(prefix);
+        reject_output_alias(&path, [input, reference])?;
+        Ok(Self {
+            output: TransactionalOutput::new(&path)?,
+            records: 0,
+        })
+    }
+
+    fn write(&mut self, metric: &SiteMetric) -> Result<()> {
+        let strand = match metric.strand() {
+            ReferenceStrand::Forward => '+',
+            ReferenceStrand::Reverse => '-',
+        };
+        let context = match metric.context() {
+            SequenceContext::Cpg => "CG",
+            SequenceContext::Chg => "CHG",
+            SequenceContext::Chh => "CHH",
+        };
+        let trinucleotide = metric.trinucleotide();
+        let trinucleotide = std::str::from_utf8(&trinucleotide)
+            .expect("trinucleotide contexts contain only ASCII bases");
+        writeln!(
+            self.output.writer(),
+            "{}\t{}\t{strand}\t{}\t{}\t{context}\t{trinucleotide}",
+            metric.chromosome(),
+            metric.end(),
+            metric.methylated(),
+            metric.unmethylated()
+        )
+        .map_err(RsomicsError::Io)?;
+        self.records = self
+            .records
+            .checked_add(1)
+            .ok_or_else(|| RsomicsError::InvalidInput("output record count overflows".into()))?;
+        Ok(())
+    }
+
+    fn commit(mut self) -> Result<u64> {
+        commit_all(std::slice::from_mut(&mut self.output), |output| output)?;
+        Ok(self.records)
+    }
+}
+
+pub fn extract_to_outputs(
     input: &Path,
     reference: &Path,
     prefix: &Path,
@@ -26,10 +78,29 @@ pub fn extract_to_standard_outputs(
     merge_context: bool,
     mut options: ExtractOptions,
 ) -> Result<ExtractOutputResult> {
-    if merge_context && matches!(format, ExtractFormat::MethylKit) {
-        return Err(RsomicsError::ConfigError(
-            "methylKit output cannot merge complementary contexts".into(),
-        ));
+    if merge_context
+        && matches!(
+            format,
+            ExtractFormat::MethylKit | ExtractFormat::CytosineReport
+        )
+    {
+        return Err(RsomicsError::ConfigError(format!(
+            "{} output cannot merge complementary contexts",
+            format.label()
+        )));
+    }
+    if matches!(format, ExtractFormat::CytosineReport) {
+        let mut output = CytosineReportOutput::new(prefix, input, reference)?;
+        let path = output.output.path().to_owned();
+        let stats =
+            extract_all_cytosines(input, reference, options, |metric| output.write(&metric))?;
+        let output_records = output.commit()?;
+        return Ok(ExtractOutputResult {
+            stats,
+            output_records,
+            merged_records: 0,
+            outputs: vec![path],
+        });
     }
     let minimum_depth = options.minimum_depth;
     if merge_context {
@@ -344,6 +415,17 @@ impl OutputMetric {
 }
 
 impl ExtractFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fraction => "fraction",
+            Self::Counts => "counts",
+            Self::Logit => "logit",
+            Self::MethylKit => "methylKit",
+            Self::CytosineReport => "cytosine-report",
+        }
+    }
+
     fn suffix(self, context: &str) -> String {
         match self {
             Self::Standard => format!("_{context}.bedGraph"),
@@ -351,6 +433,9 @@ impl ExtractFormat {
             Self::Counts => format!("_{context}.counts.bedGraph"),
             Self::Logit => format!("_{context}.logit.bedGraph"),
             Self::MethylKit => format!("_{context}.methylKit"),
+            Self::CytosineReport => {
+                unreachable!("cytosine report has one context-independent path")
+            }
         }
     }
 
@@ -371,6 +456,7 @@ impl ExtractFormat {
                 Self::Counts => "methylation counts",
                 Self::Logit => "logit transformed methylation fractions",
                 Self::MethylKit => unreachable!(),
+                Self::CytosineReport => unreachable!(),
             };
             let merged = if merged { " merged" } else { "" };
             writeln!(
@@ -429,6 +515,7 @@ impl ExtractFormat {
                     (1.0 - fraction) * 100.0
                 )
             }
+            Self::CytosineReport => unreachable!("cytosine reports use their dedicated writer"),
         }
         .map_err(RsomicsError::Io)
     }
@@ -437,6 +524,12 @@ impl ExtractFormat {
 fn context_path(prefix: &Path, context: &str, format: ExtractFormat) -> PathBuf {
     let mut path = OsString::from(prefix.as_os_str());
     path.push(format.suffix(context));
+    PathBuf::from(path)
+}
+
+fn cytosine_report_path(prefix: &Path) -> PathBuf {
+    let mut path = OsString::from(prefix.as_os_str());
+    path.push(".cytosine_report.txt");
     PathBuf::from(path)
 }
 

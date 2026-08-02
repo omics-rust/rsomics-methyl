@@ -63,6 +63,7 @@ pub struct SiteMetric {
     end: u64,
     context: SequenceContext,
     strand: ReferenceStrand,
+    trinucleotide: [u8; 3],
     methylated: u64,
     unmethylated: u64,
 }
@@ -86,6 +87,10 @@ impl SiteMetric {
 
     pub fn strand(&self) -> ReferenceStrand {
         self.strand
+    }
+
+    pub fn trinucleotide(&self) -> [u8; 3] {
+        self.trinucleotide
     }
 
     pub fn methylated(&self) -> u64 {
@@ -123,19 +128,137 @@ struct Extractor {
     references: Vec<ReferenceSequence>,
     selection: Option<ReferenceRange>,
     options: ExtractOptions,
+    exhaustive: bool,
+    report_reference_id: usize,
+    report_position: u64,
     stats: ExtractStats,
 }
 
 impl Extractor {
-    fn column(&mut self, column: &Column<'_>) -> Result<Option<SiteMetric>> {
+    fn visit_column(
+        &mut self,
+        column: &Column<'_>,
+        emit: &mut impl FnMut(SiteMetric) -> Result<()>,
+    ) -> Result<()> {
         let reference_id = usize::try_from(column.reference_id()).map_err(invalid_coordinate)?;
-        let raw_position = u64::try_from(column.position()).map_err(invalid_coordinate)?;
+        let position = u64::try_from(column.position()).map_err(invalid_coordinate)?;
         if self
             .selection
-            .is_some_and(|selection| !selection.contains(reference_id, raw_position))
+            .is_some_and(|selection| !selection.contains(reference_id, position))
         {
+            return Ok(());
+        }
+        if reference_id >= self.references.len() {
+            return Err(RsomicsError::InvalidInput(format!(
+                "pileup reference ID {reference_id} is absent"
+            )));
+        }
+        if self.exhaustive {
+            self.emit_until(reference_id, position, emit)?;
+        }
+        if let Some(metric) = self.column(column, reference_id, position)? {
+            emit(metric)?;
+        }
+        if self.exhaustive {
+            self.report_reference_id = reference_id;
+            self.report_position = position
+                .checked_add(1)
+                .ok_or_else(|| RsomicsError::InvalidInput("site end overflows".into()))?;
+        }
+        Ok(())
+    }
+
+    fn emit_remaining(&mut self, emit: &mut impl FnMut(SiteMetric) -> Result<()>) -> Result<()> {
+        if !self.exhaustive {
+            return Ok(());
+        }
+        if let Some(selection) = self.selection {
+            return self.emit_until(selection.reference_id, selection.end, emit);
+        }
+        while self.report_reference_id < self.references.len() {
+            let end = self.references[self.report_reference_id].length;
+            self.emit_until(self.report_reference_id, end, emit)?;
+            self.report_reference_id += 1;
+            self.report_position = 0;
+        }
+        Ok(())
+    }
+
+    fn emit_until(
+        &mut self,
+        reference_id: usize,
+        position: u64,
+        emit: &mut impl FnMut(SiteMetric) -> Result<()>,
+    ) -> Result<()> {
+        while self.report_reference_id < reference_id {
+            let end = self
+                .references
+                .get(self.report_reference_id)
+                .ok_or_else(|| RsomicsError::InvalidInput("report reference is absent".into()))?
+                .length;
+            self.emit_current_range(end, emit)?;
+            self.report_reference_id += 1;
+            self.report_position = 0;
+        }
+        if self.report_reference_id != reference_id || self.report_position > position {
+            return Err(RsomicsError::InvalidInput(
+                "methylation report positions are out of order".into(),
+            ));
+        }
+        self.emit_current_range(position, emit)
+    }
+
+    fn emit_current_range(
+        &mut self,
+        end: u64,
+        emit: &mut impl FnMut(SiteMetric) -> Result<()>,
+    ) -> Result<()> {
+        while self.report_position < end {
+            if let Some(metric) = self.zero_metric()? {
+                emit(metric)?;
+            }
+            self.report_position = self
+                .report_position
+                .checked_add(1)
+                .ok_or_else(|| RsomicsError::InvalidInput("report position overflows".into()))?;
+        }
+        Ok(())
+    }
+
+    fn zero_metric(&mut self) -> Result<Option<SiteMetric>> {
+        let reference = self
+            .references
+            .get(self.report_reference_id)
+            .ok_or_else(|| RsomicsError::InvalidInput("report reference is absent".into()))?;
+        let position = usize::try_from(self.report_position).map_err(invalid_coordinate)?;
+        let Some(context) = classify(&mut self.reference, &reference.name, position)? else {
+            return Ok(None);
+        };
+        if !self.includes(context.kind) {
             return Ok(None);
         }
+        self.stats.emitted_sites = checked_increment(self.stats.emitted_sites, "site")?;
+        Ok(Some(SiteMetric {
+            chromosome: reference.name.clone(),
+            start: self.report_position,
+            end: self
+                .report_position
+                .checked_add(1)
+                .ok_or_else(|| RsomicsError::InvalidInput("site end overflows".into()))?,
+            context: context.kind,
+            strand: context.strand,
+            trinucleotide: context.trinucleotide,
+            methylated: 0,
+            unmethylated: 0,
+        }))
+    }
+
+    fn column(
+        &mut self,
+        column: &Column<'_>,
+        reference_id: usize,
+        raw_position: u64,
+    ) -> Result<Option<SiteMetric>> {
         self.stats.examined_columns = checked_increment(self.stats.examined_columns, "column")?;
         let reference = self.references.get(reference_id).ok_or_else(|| {
             RsomicsError::InvalidInput(format!("pileup reference ID {reference_id} is absent"))
@@ -197,7 +320,7 @@ impl Extractor {
         let depth = methylated
             .checked_add(unmethylated)
             .ok_or_else(|| RsomicsError::InvalidInput("methylation depth overflows".into()))?;
-        if depth < self.options.minimum_depth {
+        if !self.exhaustive && depth < self.options.minimum_depth {
             return Ok(None);
         }
         self.stats.emitted_sites = checked_increment(self.stats.emitted_sites, "site")?;
@@ -210,6 +333,7 @@ impl Extractor {
                 .ok_or_else(|| RsomicsError::InvalidInput("site end overflows".into()))?,
             context: context.kind,
             strand: context.strand,
+            trinucleotide: context.trinucleotide,
             methylated,
             unmethylated,
         }))
@@ -235,6 +359,25 @@ pub fn extract(
     input: &Path,
     reference: &Path,
     options: ExtractOptions,
+    emit: impl FnMut(SiteMetric) -> Result<()>,
+) -> Result<ExtractStats> {
+    extract_with_mode(input, reference, options, false, emit)
+}
+
+pub fn extract_all_cytosines(
+    input: &Path,
+    reference: &Path,
+    options: ExtractOptions,
+    emit: impl FnMut(SiteMetric) -> Result<()>,
+) -> Result<ExtractStats> {
+    extract_with_mode(input, reference, options, true, emit)
+}
+
+fn extract_with_mode(
+    input: &Path,
+    reference: &Path,
+    options: ExtractOptions,
+    exhaustive: bool,
     mut emit: impl FnMut(SiteMetric) -> Result<()>,
 ) -> Result<ExtractStats> {
     if options.minimum_base_quality == 0 {
@@ -273,11 +416,18 @@ pub fn extract(
         reject_discordant: !options.keep_discordant,
         reject_multimappers: !options.ignore_nh,
     };
+    let (report_reference_id, report_position) = selection
+        .as_ref()
+        .map(|selection| (selection.range.reference_id, selection.range.start))
+        .unwrap_or((0, 0));
     let mut extractor = Extractor {
         reference: indexed_reference,
         references,
         selection: selection.as_ref().map(|selection| selection.range),
         options,
+        exhaustive,
+        report_reference_id,
+        report_position,
         stats: ExtractStats::default(),
     };
     let mut encoder = RawRecordEncoder::new();
@@ -295,9 +445,7 @@ pub fn extract(
             .push(raw)
             .map_err(|error| pileup_error(input, error))?;
         pileup.drain(|column| {
-            if let Some(metric) = extractor.column(column)? {
-                emit(metric)?;
-            }
+            extractor.visit_column(column, &mut emit)?;
             Ok::<(), RsomicsError>(())
         })?;
         Ok(())
@@ -311,11 +459,10 @@ pub fn extract(
         .finish()
         .map_err(|error| pileup_error(input, error))?;
     pileup.drain(|column| {
-        if let Some(metric) = extractor.column(column)? {
-            emit(metric)?;
-        }
+        extractor.visit_column(column, &mut emit)?;
         Ok::<(), RsomicsError>(())
     })?;
+    extractor.emit_remaining(&mut emit)?;
     Ok(extractor.stats)
 }
 
@@ -390,5 +537,61 @@ mod tests {
     fn quality_boost_is_checked() {
         assert_eq!(boosted(40), 48);
         assert_eq!(boosted(250), 255);
+    }
+
+    #[test]
+    fn exhaustive_scan_crosses_reference_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.fa");
+        std::fs::write(&path, b">chr1\nCAG\n>chr2\nGTT\n").unwrap();
+        std::fs::write(
+            directory.path().join("reference.fa.fai"),
+            b"chr1\t3\t6\t3\t4\nchr2\t3\t16\t3\t4\n",
+        )
+        .unwrap();
+        let mut extractor = Extractor {
+            reference: IndexedReference::open(&path).unwrap(),
+            references: vec![
+                ReferenceSequence {
+                    name: "chr1".into(),
+                    length: 3,
+                },
+                ReferenceSequence {
+                    name: "chr2".into(),
+                    length: 3,
+                },
+            ],
+            selection: None,
+            options: ExtractOptions {
+                cpg: false,
+                chg: true,
+                chh: true,
+                ..ExtractOptions::default()
+            },
+            exhaustive: true,
+            report_reference_id: 0,
+            report_position: 0,
+            stats: ExtractStats::default(),
+        };
+        let mut observed = Vec::new();
+        extractor
+            .emit_remaining(&mut |metric| {
+                observed.push((
+                    metric.chromosome().to_owned(),
+                    metric.start(),
+                    metric.context(),
+                    metric.trinucleotide(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            observed,
+            [
+                ("chr1".into(), 0, SequenceContext::Chg, *b"CAG"),
+                ("chr1".into(), 2, SequenceContext::Chg, *b"CTG"),
+                ("chr2".into(), 0, SequenceContext::Chh, *b"CNN"),
+            ]
+        );
     }
 }

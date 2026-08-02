@@ -19,6 +19,7 @@ pub enum ReferenceStrand {
 pub(crate) struct CytosineContext {
     pub(crate) kind: SequenceContext,
     pub(crate) strand: ReferenceStrand,
+    pub(crate) trinucleotide: [u8; 3],
 }
 
 pub(crate) fn classify(
@@ -38,8 +39,8 @@ pub(crate) fn classify(
     let offset = position - start;
     let sequence = reference.sequence(chromosome, start..end)?;
     let context = match sequence[offset].to_ascii_uppercase() {
-        b'C' => CytosineContext {
-            kind: if sequence
+        b'C' => {
+            let kind = if sequence
                 .get(offset + 1)
                 .is_some_and(|base| base.eq_ignore_ascii_case(&b'G'))
             {
@@ -51,22 +52,54 @@ pub(crate) fn classify(
                 SequenceContext::Chg
             } else {
                 SequenceContext::Chh
-            },
-            strand: ReferenceStrand::Forward,
-        },
-        b'G' => CytosineContext {
-            kind: if offset >= 1 && sequence[offset - 1].eq_ignore_ascii_case(&b'C') {
+            };
+            CytosineContext {
+                kind,
+                strand: ReferenceStrand::Forward,
+                trinucleotide: [
+                    b'C',
+                    normalized(sequence.get(offset + 1)),
+                    normalized(sequence.get(offset + 2)),
+                ],
+            }
+        }
+        b'G' => {
+            let kind = if offset >= 1 && sequence[offset - 1].eq_ignore_ascii_case(&b'C') {
                 SequenceContext::Cpg
             } else if offset >= 2 && sequence[offset - 2].eq_ignore_ascii_case(&b'C') {
                 SequenceContext::Chg
             } else {
                 SequenceContext::Chh
-            },
-            strand: ReferenceStrand::Reverse,
-        },
+            };
+            CytosineContext {
+                kind,
+                strand: ReferenceStrand::Reverse,
+                trinucleotide: [
+                    b'C',
+                    complement(offset.checked_sub(1).and_then(|index| sequence.get(index))),
+                    complement(offset.checked_sub(2).and_then(|index| sequence.get(index))),
+                ],
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(context))
+}
+
+fn normalized(base: Option<&u8>) -> u8 {
+    base.map(u8::to_ascii_uppercase)
+        .filter(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
+        .unwrap_or(b'N')
+}
+
+fn complement(base: Option<&u8>) -> u8 {
+    match normalized(base) {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        _ => b'N',
+    }
 }
 
 #[cfg(test)]
@@ -89,8 +122,22 @@ mod tests {
             SequenceContext::Cpg
         );
         assert_eq!(
+            classify(&mut reference, "chr1", 0)
+                .unwrap()
+                .unwrap()
+                .trinucleotide,
+            *b"CGC"
+        );
+        assert_eq!(
             classify(&mut reference, "chr1", 1).unwrap().unwrap().strand,
             ReferenceStrand::Reverse
+        );
+        assert_eq!(
+            classify(&mut reference, "chr1", 1)
+                .unwrap()
+                .unwrap()
+                .trinucleotide,
+            *b"CGN"
         );
         assert_eq!(
             classify(&mut reference, "chr1", 2).unwrap().unwrap().kind,

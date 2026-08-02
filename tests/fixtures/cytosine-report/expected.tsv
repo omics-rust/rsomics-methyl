@@ -1,0 +1,13 @@
+chrContexts	1	-	0	0	CHH	CNN
+chrContexts	2	+	0	0	CHH	CAA
+chrContexts	5	+	0	0	CHG	CAG
+chrContexts	7	-	0	0	CHG	CTG
+chrContexts	8	+	0	0	CHG	CCG
+chrContexts	9	+	0	0	CG	CGC
+chrContexts	10	-	0	0	CG	CGG
+chrContexts	11	+	0	0	CHH	CTC
+chrContexts	13	+	0	0	CHG	CNG
+chrContexts	15	-	0	0	CHG	CNG
+chrContexts	18	+	0	0	CHH	CCT
+chrContexts	19	+	0	0	CHH	CTT
+chrContexts	22	+	0	0	CHH	CNN
