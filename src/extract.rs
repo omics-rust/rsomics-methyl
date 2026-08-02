@@ -6,6 +6,7 @@ use noodles::core::Region;
 use rsomics_bamio::raw::RawRecord;
 use rsomics_common::{Result, RsomicsError};
 use rsomics_pileup::{Column, ColumnEntry, PileupEngine, PileupError, PileupOptions};
+use smallvec::SmallVec;
 
 use crate::alignment::{AlignmentFilter, DUPLICATE};
 use crate::bed::BedSelection;
@@ -353,7 +354,7 @@ impl Extractor {
             .entries()
             .any(|entry| entry.record().flags() & PAIRED != 0)
         {
-            let mut evidence = Vec::with_capacity(column.len());
+            let mut evidence = SmallVec::<[Evidence<'_>; 16]>::with_capacity(column.len());
             for entry in column.entries() {
                 if let Some(value) = self.evidence(entry)? {
                     evidence.push(value);
@@ -433,6 +434,7 @@ impl Extractor {
             base: record.seq_nibble(projection.qpos),
             quality,
             strand,
+            paired_with_mate: false,
         }))
     }
 
@@ -483,6 +485,7 @@ struct Evidence<'a> {
     base: u8,
     quality: u8,
     strand: BisulfiteStrand,
+    paired_with_mate: bool,
 }
 
 #[derive(Default)]
@@ -685,20 +688,47 @@ fn extract_with_mode(
 }
 
 fn adjust_overlaps(evidence: &mut [Evidence<'_>]) {
+    if evidence.len() <= 32 {
+        for index in 0..evidence.len() {
+            if !eligible_for_overlap(&evidence[index]) {
+                continue;
+            }
+            let name = evidence[index].record.name();
+            let Some(first) = (0..index).rev().find(|&candidate| {
+                !evidence[candidate].paired_with_mate
+                    && eligible_for_overlap(&evidence[candidate])
+                    && evidence[candidate].record.name() == name
+            }) else {
+                continue;
+            };
+            let (left, right) = evidence.split_at_mut(index);
+            left[first].paired_with_mate = true;
+            right[0].paired_with_mate = true;
+            adjust_pair(&mut left[first], &mut right[0]);
+        }
+        return;
+    }
+
     let mut pending = HashMap::<&[u8], usize>::new();
     for index in 0..evidence.len() {
-        let flags = evidence[index].record.flags();
-        if flags & PAIRED == 0 || flags & MATE_UNMAPPED != 0 {
+        if !eligible_for_overlap(&evidence[index]) {
             continue;
         }
         let name = evidence[index].record.name();
         if let Some(first) = pending.remove(name) {
             let (left, right) = evidence.split_at_mut(index);
+            left[first].paired_with_mate = true;
+            right[0].paired_with_mate = true;
             adjust_pair(&mut left[first], &mut right[0]);
         } else {
             pending.insert(name, index);
         }
     }
+}
+
+fn eligible_for_overlap(evidence: &Evidence<'_>) -> bool {
+    let flags = evidence.record.flags();
+    flags & PAIRED != 0 && flags & MATE_UNMAPPED == 0
 }
 
 fn adjust_pair(first: &mut Evidence<'_>, second: &mut Evidence<'_>) {
@@ -758,6 +788,58 @@ mod tests {
         for value in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
             assert!(VariantFilter::new(1, value).is_err());
         }
+    }
+
+    #[test]
+    fn overlap_adjustment_matches_across_depth_paths() {
+        for pairs in [1, 17] {
+            let records = (0..pairs)
+                .flat_map(|pair| {
+                    let name = format!("p{pair}");
+                    [paired_record(&name), paired_record(&name)]
+                })
+                .collect::<Vec<_>>();
+            let mut evidence = records
+                .iter()
+                .enumerate()
+                .map(|(index, record)| Evidence {
+                    record,
+                    base: 2,
+                    quality: if index % 2 == 0 { 40 } else { 30 },
+                    strand: BisulfiteStrand::Ot,
+                    paired_with_mate: false,
+                })
+                .collect::<Vec<_>>();
+
+            adjust_overlaps(&mut evidence);
+
+            for pair in evidence.chunks_exact(2) {
+                assert_eq!([pair[0].quality, pair[1].quality], [48, 0]);
+                assert!(pair[0].paired_with_mate);
+                assert!(pair[1].paired_with_mate);
+            }
+        }
+    }
+
+    fn paired_record(name: &str) -> RawRecord {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        payload.push(u8::try_from(name.len() + 1).unwrap());
+        payload.push(60);
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        payload.extend_from_slice(&PAIRED.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(&(1u32 << 4).to_le_bytes());
+        payload.push(0x20);
+        payload.push(40);
+        RawRecord::try_from(payload).unwrap()
     }
 
     #[test]

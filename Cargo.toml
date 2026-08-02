@@ -33,6 +33,7 @@ rsomics-help = "0.4"
 rsomics-intervals = "0.3"
 rsomics-pileup = "0.7"
 serde = { version = "1", features = ["derive"] }
+smallvec = "1"
 tempfile = "3"
 
 [dev-dependencies]
