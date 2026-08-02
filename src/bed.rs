@@ -34,7 +34,7 @@ impl BedSelection {
         let reference_ids = references
             .iter()
             .enumerate()
-            .map(|(id, reference)| (reference.name.as_str(), id))
+            .map(|(id, reference)| (reference.name.as_ref(), id))
             .collect::<HashMap<_, _>>();
         let mut selection = Self {
             references: (0..references.len())

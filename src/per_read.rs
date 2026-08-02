@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use noodles::core::Region;
-use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
+use rsomics_bamio::raw::RawRecord;
 use rsomics_common::{Result, RsomicsError};
 
 use crate::alignment::{AlignmentFilter, invalid_record};
@@ -9,7 +9,7 @@ use crate::bed::BedSelection;
 use crate::calling::{AlignmentCaller, AlignmentLocation};
 use crate::context::SequenceContext;
 use crate::reference::IndexedReference;
-use crate::selection::{AlignmentRecordResult, alignment_records, resolve_region};
+use crate::selection::{alignment_error, resolve_region, visit_alignment_records};
 
 #[derive(Clone, Debug)]
 pub struct PerReadOptions {
@@ -133,11 +133,8 @@ pub fn per_read(
     let mut caller = PerReadCaller {
         calls: AlignmentCaller::new(indexed_reference, references, options.minimum_base_quality),
     };
-    let mut encoder = RawRecordEncoder::new();
     let mut stats = PerReadStats::default();
-    let mut process = |result: AlignmentRecordResult| -> Result<()> {
-        let record = result.map_err(|error| alignment_error(input, error))?;
-        let record = encoder.encode(&header, record.as_ref())?;
+    visit_alignment_records(input, &mut reader, &header, selection.as_ref(), |record| {
         if let Some(selection) = &selection {
             let reference_id = usize::try_from(record.reference_sequence_id())
                 .map_err(|error| invalid_record(&record, error))?;
@@ -167,12 +164,7 @@ pub fn per_read(
         emit(result.metric)?;
         stats.output_records = checked_increment(stats.output_records, "output record")?;
         Ok(())
-    };
-    let records = alignment_records(&mut reader, &header, selection.as_ref())
-        .map_err(|error| alignment_error(input, error))?;
-    for result in records {
-        process(result)?;
-    }
+    })?;
     Ok(stats)
 }
 
@@ -218,10 +210,6 @@ fn checked_increment(value: u64, field: &str) -> Result<u64> {
     value
         .checked_add(1)
         .ok_or_else(|| RsomicsError::InvalidInput(format!("{field} overflows")))
-}
-
-fn alignment_error(path: &Path, error: impl std::fmt::Display) -> RsomicsError {
-    RsomicsError::InvalidInput(format!("reading alignment {}: {error}", path.display()))
 }
 
 #[cfg(test)]

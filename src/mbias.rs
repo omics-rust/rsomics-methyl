@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use noodles::core::Region;
-use rsomics_bamio::raw::RawRecordEncoder;
 use rsomics_common::{Result, RsomicsError};
 
 use crate::alignment::{AlignmentFilter, DUPLICATE};
@@ -11,7 +10,7 @@ use crate::calling::AlignmentCaller;
 use crate::context::SequenceContext;
 use crate::conversion::{ConversionFilter, validate_conversion_efficiency};
 use crate::reference::IndexedReference;
-use crate::selection::{alignment_records, resolve_region};
+use crate::selection::{alignment_error, resolve_region, visit_alignment_records};
 use crate::strand::BisulfiteStrand;
 use crate::trimming::TrimmingOptions;
 
@@ -207,24 +206,19 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
     };
     let mut caller =
         AlignmentCaller::new(indexed_reference, references, options.minimum_base_quality);
-    let mut encoder = RawRecordEncoder::new();
     let mut counts = BTreeMap::<(BisulfiteStrand, u64, u8), Counts>::new();
     let mut stats = MbiasStats::default();
-    let records = alignment_records(&mut reader, &header, selection.as_ref())
-        .map_err(|error| alignment_error(input, error))?;
-    for result in records {
-        let record = result.map_err(|error| alignment_error(input, error))?;
-        let record = encoder.encode(&header, record.as_ref())?;
+    visit_alignment_records(input, &mut reader, &header, selection.as_ref(), |record| {
         stats.input_records = increment(stats.input_records, "input record")?;
         if !filter.passes(&record)? {
             stats.filtered_records = increment(stats.filtered_records, "filtered record")?;
-            continue;
+            return Ok(());
         }
         if let Some(conversion) = conversion.as_mut()
             && !conversion.passes(&record)?
         {
             stats.filtered_records = increment(stats.filtered_records, "filtered record")?;
-            continue;
+            return Ok(());
         }
         let sequence_length = u64::try_from(record.sequence_len())
             .map_err(|error| RsomicsError::InvalidInput(error.to_string()))?;
@@ -260,7 +254,8 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
             stats.calls = increment(stats.calls, "M-bias call")?;
             Ok(())
         })?;
-    }
+        Ok(())
+    })?;
     let metrics = counts
         .into_iter()
         .map(|((strand, query_position, read), counts)| {
@@ -397,10 +392,6 @@ fn increment(value: u64, field: &str) -> Result<u64> {
     value
         .checked_add(1)
         .ok_or_else(|| RsomicsError::InvalidInput(format!("{field} overflows")))
-}
-
-fn alignment_error(path: &Path, error: impl std::fmt::Display) -> RsomicsError {
-    RsomicsError::InvalidInput(format!("reading alignment {}: {error}", path.display()))
 }
 
 #[cfg(test)]

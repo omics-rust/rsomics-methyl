@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -270,6 +269,7 @@ struct OutputEntry {
     chromosome: Option<String>,
     pending: BTreeMap<(u64, u64), OutputMetric>,
     excluded: BTreeSet<(u64, u64)>,
+    line: Vec<u8>,
     output: TransactionalOutput,
 }
 
@@ -282,11 +282,12 @@ impl OutputEntry {
             chromosome: None,
             pending: BTreeMap::new(),
             excluded: BTreeSet::new(),
+            line: Vec::with_capacity(128),
             output,
         })
     }
 
-    fn file(&mut self) -> &mut fs::File {
+    fn file(&mut self) -> &mut dyn Write {
         self.output.writer()
     }
 
@@ -298,11 +299,11 @@ impl OutputEntry {
         metric: &SiteMetric,
     ) -> Result<OutputStats> {
         let mut stats = OutputStats::default();
-        let mut metric = OutputMetric::from(metric);
-        if !merge_context || metric.context == SequenceContext::Chh {
-            stats.add(self.write_metric(format, minimum_depth, metric)?)?;
+        if !merge_context || metric.context() == SequenceContext::Chh {
+            stats.add(self.write_site_metric(format, minimum_depth, metric)?)?;
             return Ok(stats);
         }
+        let mut metric = OutputMetric::from(metric);
         if self.chromosome.as_deref() != Some(metric.chromosome.as_str()) {
             stats.add(self.flush_all(format, minimum_depth)?)?;
             self.chromosome = Some(metric.chromosome.clone());
@@ -393,10 +394,54 @@ impl OutputEntry {
         minimum_depth: u64,
         metric: OutputMetric,
     ) -> Result<OutputStats> {
-        if metric.depth()? < minimum_depth {
+        let depth = metric.depth()?;
+        if depth < minimum_depth {
             return Ok(OutputStats::default());
         }
-        format.write_metric(self.file(), &metric)?;
+        let values = MetricValues {
+            chromosome: &metric.chromosome,
+            start: metric.start,
+            end: metric.end,
+            strand: metric.strand,
+            methylated: metric.methylated,
+            unmethylated: metric.unmethylated,
+            depth,
+        };
+        if matches!(format, ExtractFormat::Standard) {
+            write_standard(&mut self.output, &mut self.line, values)?;
+        } else {
+            format.write_values(self.file(), values)?;
+        }
+        Ok(OutputStats {
+            output_records: 1,
+            merged_records: 0,
+        })
+    }
+
+    fn write_site_metric(
+        &mut self,
+        format: ExtractFormat,
+        minimum_depth: u64,
+        metric: &SiteMetric,
+    ) -> Result<OutputStats> {
+        let depth = metric.depth();
+        if depth < minimum_depth {
+            return Ok(OutputStats::default());
+        }
+        let values = MetricValues {
+            chromosome: metric.chromosome(),
+            start: metric.start(),
+            end: metric.end(),
+            strand: metric.strand(),
+            methylated: metric.methylated(),
+            unmethylated: metric.unmethylated(),
+            depth,
+        };
+        if matches!(format, ExtractFormat::Standard) {
+            write_standard(&mut self.output, &mut self.line, values)?;
+        } else {
+            format.write_values(self.file(), values)?;
+        }
         Ok(OutputStats {
             output_records: 1,
             merged_records: 0,
@@ -412,6 +457,39 @@ struct OutputMetric {
     strand: ReferenceStrand,
     methylated: u64,
     unmethylated: u64,
+}
+
+#[derive(Clone, Copy)]
+struct MetricValues<'a> {
+    chromosome: &'a str,
+    start: u64,
+    end: u64,
+    strand: ReferenceStrand,
+    methylated: u64,
+    unmethylated: u64,
+    depth: u64,
+}
+
+fn write_standard(
+    output: &mut TransactionalOutput,
+    line: &mut Vec<u8>,
+    metric: MetricValues<'_>,
+) -> Result<()> {
+    line.clear();
+    line.extend_from_slice(metric.chromosome.as_bytes());
+    let mut buffer = itoa::Buffer::new();
+    for value in [
+        metric.start,
+        metric.end,
+        percentage(metric.methylated, metric.depth),
+        metric.methylated,
+        metric.unmethylated,
+    ] {
+        line.push(b'\t');
+        line.extend_from_slice(buffer.format(value).as_bytes());
+    }
+    line.push(b'\n');
+    output.writer().write_all(line).map_err(RsomicsError::Io)
 }
 
 impl From<&SiteMetric> for OutputMetric {
@@ -448,15 +526,6 @@ impl OutputMetric {
         self.methylated
             .checked_add(self.unmethylated)
             .ok_or_else(|| RsomicsError::InvalidInput("methylation depth overflows".into()))
-    }
-
-    fn percentage(&self) -> Result<u64> {
-        let depth = self.depth()?;
-        if depth == 0 {
-            Ok(0)
-        } else {
-            Ok((u128::from(self.methylated) * 100 / u128::from(depth)) as u64)
-        }
     }
 
     fn apply_merged_span(&mut self) -> Result<()> {
@@ -521,7 +590,7 @@ impl ExtractFormat {
 
     fn write_header(
         self,
-        writer: &mut fs::File,
+        writer: &mut dyn Write,
         prefix: &Path,
         context: &str,
         merged: bool,
@@ -548,48 +617,51 @@ impl ExtractFormat {
         }
     }
 
-    fn write_metric(self, writer: &mut fs::File, metric: &OutputMetric) -> Result<()> {
-        let depth = metric.depth()?;
-        let fraction = metric.methylated as f64 / depth as f64;
+    fn write_values(self, writer: &mut dyn Write, metric: MetricValues<'_>) -> Result<()> {
+        let MetricValues {
+            chromosome,
+            start,
+            end,
+            strand,
+            methylated,
+            unmethylated,
+            depth,
+        } = metric;
         match self {
             Self::Standard => writeln!(
                 writer,
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                metric.chromosome,
-                metric.start,
-                metric.end,
-                metric.percentage()?,
-                metric.methylated,
-                metric.unmethylated
+                chromosome,
+                start,
+                end,
+                percentage(methylated, depth),
+                methylated,
+                unmethylated
             ),
-            Self::Fraction => writeln!(
-                writer,
-                "{}\t{}\t{}\t{fraction:.6}",
-                metric.chromosome, metric.start, metric.end
-            ),
-            Self::Counts => writeln!(
-                writer,
-                "{}\t{}\t{}\t{depth}",
-                metric.chromosome, metric.start, metric.end
-            ),
-            Self::Logit => writeln!(
-                writer,
-                "{}\t{}\t{}\t{:.6}",
-                metric.chromosome,
-                metric.start,
-                metric.end,
-                fraction.ln() - (-fraction).ln_1p()
-            ),
+            Self::Fraction => {
+                let fraction = methylated as f64 / depth as f64;
+                writeln!(writer, "{chromosome}\t{start}\t{end}\t{fraction:.6}")
+            }
+            Self::Counts => writeln!(writer, "{chromosome}\t{start}\t{end}\t{depth}"),
+            Self::Logit => {
+                let fraction = methylated as f64 / depth as f64;
+                writeln!(
+                    writer,
+                    "{chromosome}\t{start}\t{end}\t{:.6}",
+                    fraction.ln() - (-fraction).ln_1p()
+                )
+            }
             Self::MethylKit => {
-                let position = metric.end;
-                let strand = match metric.strand {
+                let fraction = methylated as f64 / depth as f64;
+                let position = end;
+                let strand = match strand {
                     ReferenceStrand::Forward => 'F',
                     ReferenceStrand::Reverse => 'R',
                 };
                 writeln!(
                     writer,
                     "{0}.{1}\t{0}\t{1}\t{strand}\t{depth}\t{2:6.2}\t{3:6.2}",
-                    metric.chromosome,
+                    chromosome,
                     position,
                     fraction * 100.0,
                     (1.0 - fraction) * 100.0
@@ -598,6 +670,14 @@ impl ExtractFormat {
             Self::CytosineReport => unreachable!("cytosine reports use their dedicated writer"),
         }
         .map_err(RsomicsError::Io)
+    }
+}
+
+fn percentage(methylated: u64, depth: u64) -> u64 {
+    if depth == 0 {
+        0
+    } else {
+        (u128::from(methylated) * 100 / u128::from(depth)) as u64
     }
 }
 
@@ -615,6 +695,8 @@ fn cytosine_report_path(prefix: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]

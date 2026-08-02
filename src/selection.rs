@@ -1,8 +1,10 @@
 use std::io;
+use std::path::Path;
 
 use noodles::core::{Position, Region};
 use noodles::sam;
-use rsomics_bamio::IndexedAlignmentReader;
+use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
+use rsomics_bamio::{IndexedAlignmentReader, visit_raw_alignment_records};
 use rsomics_common::{Result, RsomicsError};
 
 use crate::reference::ReferenceSequence;
@@ -25,9 +27,9 @@ pub(crate) struct RegionSelection {
     pub(crate) range: ReferenceRange,
 }
 
-pub(crate) type AlignmentRecordResult = io::Result<Box<dyn sam::alignment::Record>>;
+type AlignmentRecordResult = io::Result<Box<dyn sam::alignment::Record>>;
 
-pub(crate) fn alignment_records<'r, 'h: 'r>(
+fn alignment_records<'r, 'h: 'r>(
     reader: &'r mut IndexedAlignmentReader,
     header: &'h sam::Header,
     selection: Option<&RegionSelection>,
@@ -38,6 +40,27 @@ pub(crate) fn alignment_records<'r, 'h: 'r>(
             .map(|records| Box::new(records) as Box<dyn Iterator<Item = AlignmentRecordResult>>),
         None => Ok(Box::new(reader.records(header))),
     }
+}
+
+pub(crate) fn visit_alignment_records(
+    input: &Path,
+    reader: &mut IndexedAlignmentReader,
+    header: &sam::Header,
+    selection: Option<&RegionSelection>,
+    mut visit: impl FnMut(RawRecord) -> Result<()>,
+) -> Result<()> {
+    if selection.is_none() {
+        return visit_raw_alignment_records(reader, header, visit);
+    }
+
+    let mut encoder = RawRecordEncoder::new();
+    let records = alignment_records(reader, header, selection)
+        .map_err(|error| alignment_error(input, error))?;
+    for result in records {
+        let record = result.map_err(|error| alignment_error(input, error))?;
+        visit(encoder.encode(header, record.as_ref())?)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_region(
@@ -93,6 +116,10 @@ fn position(value: u64) -> Result<Position> {
 
 fn invalid_coordinate(error: impl std::fmt::Display) -> RsomicsError {
     RsomicsError::InvalidInput(format!("region coordinate is invalid: {error}"))
+}
+
+pub(crate) fn alignment_error(path: &Path, error: impl std::fmt::Display) -> RsomicsError {
+    RsomicsError::InvalidInput(format!("reading alignment {}: {error}", path.display()))
 }
 
 #[cfg(test)]

@@ -58,6 +58,8 @@ impl AlignmentCaller {
         })?;
         let start = usize::try_from(record.alignment_start())
             .map_err(|error| invalid_record(record, error))?;
+        let reference_length =
+            usize::try_from(reference.length).map_err(|error| invalid_record(record, error))?;
         let strand = bisulfite_strand(record)?;
         let read = read_number(record);
         let mut query_position = 0usize;
@@ -80,8 +82,12 @@ impl AlignmentCaller {
                             .copied()
                             .unwrap_or(u8::MAX);
                         if quality >= self.minimum_base_quality
-                            && let Some(context) =
-                                classify(&mut self.reference, &reference.name, reference_position)?
+                            && let Some(context) = classify(
+                                &mut self.reference,
+                                &reference.name,
+                                reference_length,
+                                reference_position,
+                            )?
                             && strand.is_top() == (context.strand == ReferenceStrand::Forward)
                             && let Some(methylated) =
                                 methylation_state(strand, record.seq_nibble(query_position))
@@ -126,13 +132,11 @@ impl AlignmentCaller {
                 ),
             ));
         }
-        let reference_length =
-            usize::try_from(reference.length).map_err(|error| invalid_record(record, error))?;
         if reference_position > reference_length {
             return Err(invalid_record(record, "CIGAR extends beyond the reference"));
         }
         Ok(AlignmentLocation {
-            chromosome: reference.name.clone(),
+            chromosome: reference.name.to_string(),
             reference_id,
             start: u64::try_from(start).map_err(|error| invalid_record(record, error))?,
             end: u64::try_from(reference_position)

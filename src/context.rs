@@ -25,10 +25,9 @@ pub(crate) struct CytosineContext {
 pub(crate) fn classify(
     reference: &mut IndexedReference,
     chromosome: &str,
+    length: usize,
     position: usize,
 ) -> Result<Option<CytosineContext>> {
-    let length =
-        usize::try_from(reference.length(chromosome)?).map_err(|error| reference.error(error))?;
     if position >= length {
         return Err(reference.error(format!(
             "{chromosome}:{position} is outside reference length {length}"
@@ -118,35 +117,47 @@ mod tests {
         .unwrap();
         let mut reference = IndexedReference::open(&path).unwrap();
         assert_eq!(
-            classify(&mut reference, "chr1", 0).unwrap().unwrap().kind,
+            classify(&mut reference, "chr1", 7, 0)
+                .unwrap()
+                .unwrap()
+                .kind,
             SequenceContext::Cpg
         );
         assert_eq!(
-            classify(&mut reference, "chr1", 0)
+            classify(&mut reference, "chr1", 7, 0)
                 .unwrap()
                 .unwrap()
                 .trinucleotide,
             *b"CGC"
         );
         assert_eq!(
-            classify(&mut reference, "chr1", 1).unwrap().unwrap().strand,
+            classify(&mut reference, "chr1", 7, 1)
+                .unwrap()
+                .unwrap()
+                .strand,
             ReferenceStrand::Reverse
         );
         assert_eq!(
-            classify(&mut reference, "chr1", 1)
+            classify(&mut reference, "chr1", 7, 1)
                 .unwrap()
                 .unwrap()
                 .trinucleotide,
             *b"CGN"
         );
         assert_eq!(
-            classify(&mut reference, "chr1", 2).unwrap().unwrap().kind,
+            classify(&mut reference, "chr1", 7, 2)
+                .unwrap()
+                .unwrap()
+                .kind,
             SequenceContext::Chg
         );
         assert_eq!(
-            classify(&mut reference, "chr1", 5).unwrap().unwrap().kind,
+            classify(&mut reference, "chr1", 7, 5)
+                .unwrap()
+                .unwrap()
+                .kind,
             SequenceContext::Chh
         );
-        assert_eq!(classify(&mut reference, "chr1", 6).unwrap(), None);
+        assert_eq!(classify(&mut reference, "chr1", 7, 6).unwrap(), None);
     }
 }

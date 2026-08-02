@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use noodles::core::{Position, Region};
 use noodles::fasta;
@@ -17,6 +18,8 @@ pub(crate) struct IndexedReference {
     chromosome: Vec<u8>,
     sequence_start: usize,
     sequence: Vec<u8>,
+    #[cfg(test)]
+    fetch_count: usize,
 }
 
 impl IndexedReference {
@@ -46,6 +49,8 @@ impl IndexedReference {
             chromosome: Vec::new(),
             sequence_start: 0,
             sequence: Vec::new(),
+            #[cfg(test)]
+            fetch_count: 0,
         })
     }
 
@@ -73,7 +78,7 @@ impl IndexedReference {
                     )));
                 }
                 Ok(ReferenceSequence {
-                    name,
+                    name: Arc::from(name),
                     length: reference_length,
                 })
             })
@@ -90,7 +95,7 @@ impl IndexedReference {
             if range.start >= range.end || range.end > length {
                 return Err(self.error("requested reference range is invalid"));
             }
-            let start = range.start / CHUNK_SIZE * CHUNK_SIZE;
+            let start = range.start;
             let end = start
                 .checked_add(CHUNK_SIZE)
                 .map_or(length, |value| value.min(length))
@@ -110,6 +115,10 @@ impl IndexedReference {
             self.sequence_start = start;
             self.sequence.clear();
             self.sequence.extend_from_slice(record.sequence().as_ref());
+            #[cfg(test)]
+            {
+                self.fetch_count += 1;
+            }
         }
         let start = range
             .start
@@ -138,7 +147,7 @@ impl IndexedReference {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ReferenceSequence {
-    pub(crate) name: String,
+    pub(crate) name: Arc<str>,
     pub(crate) length: u64,
 }
 
@@ -158,5 +167,40 @@ mod tests {
         .unwrap();
 
         assert!(IndexedReference::open(&path).is_err());
+    }
+
+    #[test]
+    fn advances_the_reference_cache_across_chunk_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.fa");
+        let length = CHUNK_SIZE + 8;
+        let sequence = vec![b'A'; length];
+        let mut fasta = b">chr1\n".to_vec();
+        for line in sequence.chunks(64) {
+            fasta.extend_from_slice(line);
+            fasta.push(b'\n');
+        }
+        std::fs::write(&path, fasta).unwrap();
+        std::fs::write(
+            directory.path().join("reference.fa.fai"),
+            format!("chr1\t{length}\t6\t64\t65\n"),
+        )
+        .unwrap();
+
+        let mut reference = IndexedReference::open(&path).unwrap();
+        assert_eq!(reference.sequence("chr1", 0..5).unwrap(), b"AAAAA");
+        assert_eq!(
+            reference
+                .sequence("chr1", CHUNK_SIZE - 2..CHUNK_SIZE + 3)
+                .unwrap(),
+            b"AAAAA"
+        );
+        assert_eq!(
+            reference
+                .sequence("chr1", CHUNK_SIZE - 1..CHUNK_SIZE + 4)
+                .unwrap(),
+            b"AAAAA"
+        );
+        assert_eq!(reference.fetch_count, 2);
     }
 }

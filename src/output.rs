@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -10,9 +10,11 @@ use tempfile::{Builder, NamedTempFile};
 pub(crate) struct TransactionalOutput {
     path: PathBuf,
     parent: PathBuf,
-    temporary: Option<NamedTempFile>,
+    temporary: Option<BufWriter<NamedTempFile>>,
     backup: Option<Backup>,
 }
+
+const OUTPUT_BUFFER_SIZE: usize = 1024 * 1024;
 
 pub(crate) fn commit_all<T>(
     items: &mut [T],
@@ -62,7 +64,7 @@ impl TransactionalOutput {
         Ok(Self {
             path: path.to_owned(),
             parent: parent.to_owned(),
-            temporary: Some(temporary),
+            temporary: Some(BufWriter::with_capacity(OUTPUT_BUFFER_SIZE, temporary)),
             backup: Some(Backup::new(path)?),
         })
     }
@@ -71,19 +73,22 @@ impl TransactionalOutput {
         &self.path
     }
 
-    pub(crate) fn writer(&mut self) -> &mut fs::File {
+    pub(crate) fn writer(&mut self) -> &mut dyn Write {
         self.temporary
             .as_mut()
             .expect("temporary output is present before commit")
-            .as_file_mut()
     }
 
     pub(crate) fn prepare(&mut self) -> Result<()> {
         self.writer()
             .flush()
             .rs_with_context(|| format!("flushing output {}", self.path.display()))?;
-        self.writer()
-            .sync_all()
+        self.temporary
+            .as_ref()
+            .expect("temporary output is present before commit")
+            .get_ref()
+            .as_file()
+            .sync_data()
             .rs_with_context(|| format!("syncing output {}", self.path.display()))
     }
 
@@ -91,7 +96,9 @@ impl TransactionalOutput {
         let temporary = self
             .temporary
             .take()
-            .expect("temporary output is present before commit");
+            .expect("temporary output is present before commit")
+            .into_inner()
+            .map_err(|error| RsomicsError::Io(error.into_error()))?;
         temporary.persist(&self.path).map_err(|error| {
             RsomicsError::Io(io::Error::new(
                 error.error.kind(),

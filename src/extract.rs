@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use noodles::core::Region;
-use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
+use rsomics_bamio::raw::RawRecord;
 use rsomics_common::{Result, RsomicsError};
-use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
+use rsomics_pileup::{Column, ColumnEntry, PileupEngine, PileupError, PileupOptions};
 
 use crate::alignment::{AlignmentFilter, DUPLICATE};
 use crate::bed::BedSelection;
 use crate::calling::read_number;
-use crate::context::{ReferenceStrand, SequenceContext, classify};
+use crate::context::{CytosineContext, ReferenceStrand, SequenceContext, classify};
 use crate::conversion::{ConversionFilter, validate_conversion_efficiency};
 use crate::reference::{IndexedReference, ReferenceSequence};
-use crate::selection::{AlignmentRecordResult, ReferenceRange, alignment_records, resolve_region};
+use crate::selection::{ReferenceRange, alignment_error, resolve_region, visit_alignment_records};
 use crate::strand::{BisulfiteStrand, bisulfite_strand};
 use crate::trimming::TrimmingOptions;
 
@@ -70,7 +71,7 @@ impl Default for ExtractOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SiteMetric {
-    chromosome: String,
+    chromosome: Arc<str>,
     start: u64,
     end: u64,
     context: SequenceContext,
@@ -82,7 +83,7 @@ pub struct SiteMetric {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExcludedVariantSite {
-    chromosome: String,
+    chromosome: Arc<str>,
     start: u64,
     context: SequenceContext,
     strand: ReferenceStrand,
@@ -288,7 +289,9 @@ impl Extractor {
             .get(self.report_reference_id)
             .ok_or_else(|| RsomicsError::InvalidInput("report reference is absent".into()))?;
         let position = usize::try_from(self.report_position).map_err(invalid_coordinate)?;
-        let Some(context) = classify(&mut self.reference, &reference.name, position)? else {
+        let length = usize::try_from(reference.length).map_err(invalid_coordinate)?;
+        let Some(context) = classify(&mut self.reference, &reference.name, length, position)?
+        else {
             return Ok(None);
         };
         if !self.includes(context.kind)
@@ -329,7 +332,9 @@ impl Extractor {
             RsomicsError::InvalidInput(format!("pileup reference ID {reference_id} is absent"))
         })?;
         let position = usize::try_from(raw_position).map_err(invalid_coordinate)?;
-        let Some(context) = classify(&mut self.reference, &reference.name, position)? else {
+        let length = usize::try_from(reference.length).map_err(invalid_coordinate)?;
+        let Some(context) = classify(&mut self.reference, &reference.name, length, position)?
+        else {
             return Ok(None);
         };
         if !self.includes(context.kind)
@@ -343,68 +348,35 @@ impl Extractor {
         {
             return Ok(None);
         }
-        let mut evidence = Vec::with_capacity(column.len());
-        for entry in column.entries() {
-            let projection = entry.projection();
-            if projection.is_deletion || projection.is_reference_skip {
-                continue;
-            }
-            let record = entry.record();
-            let strand = bisulfite_strand(record)?;
-            if !self.options.trimming.includes(
-                strand,
-                read_number(record),
-                u64::try_from(record.sequence_len()).map_err(invalid_coordinate)?,
-                u64::try_from(projection.qpos).map_err(invalid_coordinate)?,
-            )? {
-                continue;
-            }
-            let quality = record
-                .quality_scores()
-                .get(projection.qpos)
-                .copied()
-                .unwrap_or(u8::MAX);
-            evidence.push(Evidence {
-                record,
-                base: record.seq_nibble(projection.qpos),
-                quality,
-                strand,
-            });
-        }
-        adjust_overlaps(&mut evidence);
-        let mut methylated = 0u64;
-        let mut unmethylated = 0u64;
-        let mut opposite = OppositeEvidence::default();
-        for value in evidence {
-            if value.quality < self.options.minimum_base_quality
-                || self.bed.as_ref().is_some_and(|selection| {
-                    !selection.contains(reference_id, raw_position, value.strand.is_top())
-                })
-            {
-                continue;
-            }
-            if value.strand.is_top() != (context.strand == ReferenceStrand::Forward) {
-                if self.variant_filter.is_some() {
-                    opposite.observe(value.strand, value.base)?;
+        let mut counts = EvidenceCounts::default();
+        if column
+            .entries()
+            .any(|entry| entry.record().flags() & PAIRED != 0)
+        {
+            let mut evidence = Vec::with_capacity(column.len());
+            for entry in column.entries() {
+                if let Some(value) = self.evidence(entry)? {
+                    evidence.push(value);
                 }
-                continue;
             }
-            match (value.strand.is_top(), value.base) {
-                (true, 2) | (false, 4) => {
-                    methylated = checked_increment(methylated, "methylated count")?;
+            adjust_overlaps(&mut evidence);
+            for value in evidence {
+                self.observe(value, reference_id, raw_position, context, &mut counts)?;
+            }
+        } else {
+            for entry in column.entries() {
+                if let Some(value) = self.evidence(entry)? {
+                    self.observe(value, reference_id, raw_position, context, &mut counts)?;
                 }
-                (true, 8) | (false, 1) => {
-                    unmethylated = checked_increment(unmethylated, "unmethylated count")?;
-                }
-                _ => {}
             }
         }
-        let depth = methylated
-            .checked_add(unmethylated)
+        let depth = counts
+            .methylated
+            .checked_add(counts.unmethylated)
             .ok_or_else(|| RsomicsError::InvalidInput("methylation depth overflows".into()))?;
         if self
             .variant_filter
-            .is_some_and(|filter| filter.excludes(opposite))
+            .is_some_and(|filter| filter.excludes(counts.opposite))
         {
             self.stats.excluded_variant_sites =
                 checked_increment(self.stats.excluded_variant_sites, "excluded variant site")?;
@@ -413,8 +385,8 @@ impl Extractor {
                 start: raw_position,
                 context: context.kind,
                 strand: context.strand,
-                opposite_depth: opposite.depth,
-                variant_bases: opposite.variant_bases,
+                opposite_depth: counts.opposite.depth,
+                variant_bases: counts.opposite.variant_bases,
             })));
         }
         if !self.exhaustive && depth < self.options.minimum_depth {
@@ -431,9 +403,70 @@ impl Extractor {
             context: context.kind,
             strand: context.strand,
             trinucleotide: context.trinucleotide,
-            methylated,
-            unmethylated,
+            methylated: counts.methylated,
+            unmethylated: counts.unmethylated,
         })))
+    }
+
+    fn evidence<'a>(&self, entry: ColumnEntry<'a>) -> Result<Option<Evidence<'a>>> {
+        let projection = entry.projection();
+        if projection.is_deletion || projection.is_reference_skip {
+            return Ok(None);
+        }
+        let record = entry.record();
+        let strand = bisulfite_strand(record)?;
+        if !self.options.trimming.includes(
+            strand,
+            read_number(record),
+            u64::try_from(record.sequence_len()).map_err(invalid_coordinate)?,
+            u64::try_from(projection.qpos).map_err(invalid_coordinate)?,
+        )? {
+            return Ok(None);
+        }
+        let quality = record
+            .quality_scores()
+            .get(projection.qpos)
+            .copied()
+            .unwrap_or(u8::MAX);
+        Ok(Some(Evidence {
+            record,
+            base: record.seq_nibble(projection.qpos),
+            quality,
+            strand,
+        }))
+    }
+
+    fn observe(
+        &self,
+        value: Evidence<'_>,
+        reference_id: usize,
+        position: u64,
+        context: CytosineContext,
+        counts: &mut EvidenceCounts,
+    ) -> Result<()> {
+        if value.quality < self.options.minimum_base_quality
+            || self.bed.as_ref().is_some_and(|selection| {
+                !selection.contains(reference_id, position, value.strand.is_top())
+            })
+        {
+            return Ok(());
+        }
+        if value.strand.is_top() != (context.strand == ReferenceStrand::Forward) {
+            if self.variant_filter.is_some() {
+                counts.opposite.observe(value.strand, value.base)?;
+            }
+            return Ok(());
+        }
+        match (value.strand.is_top(), value.base) {
+            (true, 2) | (false, 4) => {
+                counts.methylated = checked_increment(counts.methylated, "methylated count")?;
+            }
+            (true, 8) | (false, 1) => {
+                counts.unmethylated = checked_increment(counts.unmethylated, "unmethylated count")?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn includes(&self, context: SequenceContext) -> bool {
@@ -450,6 +483,13 @@ struct Evidence<'a> {
     base: u8,
     quality: u8,
     strand: BisulfiteStrand,
+}
+
+#[derive(Default)]
+struct EvidenceCounts {
+    methylated: u64,
+    unmethylated: u64,
+    opposite: OppositeEvidence,
 }
 
 #[derive(Clone, Copy)]
@@ -612,10 +652,7 @@ fn extract_with_mode(
         report_position,
         stats: ExtractStats::default(),
     };
-    let mut encoder = RawRecordEncoder::new();
-    let mut process = |result: AlignmentRecordResult| -> Result<()> {
-        let record = result.map_err(|error| alignment_error(input, error))?;
-        let raw = encoder.encode(&header, record.as_ref())?;
+    visit_alignment_records(input, &mut reader, &header, selection.as_ref(), |raw| {
         extractor.stats.input_records =
             checked_increment(extractor.stats.input_records, "input record")?;
         let mut passes = filter.passes(&raw)?;
@@ -635,12 +672,7 @@ fn extract_with_mode(
             Ok::<(), RsomicsError>(())
         })?;
         Ok(())
-    };
-    let records = alignment_records(&mut reader, &header, selection.as_ref())
-        .map_err(|error| alignment_error(input, error))?;
-    for result in records {
-        process(result)?;
-    }
+    })?;
     pileup
         .finish()
         .map_err(|error| pileup_error(input, error))?;
@@ -705,10 +737,6 @@ fn checked_increment(value: u64, field: &str) -> Result<u64> {
 
 fn invalid_coordinate(error: impl std::fmt::Display) -> RsomicsError {
     RsomicsError::InvalidInput(format!("invalid pileup coordinate: {error}"))
-}
-
-fn alignment_error(path: &Path, error: impl std::fmt::Display) -> RsomicsError {
-    RsomicsError::InvalidInput(format!("reading alignment {}: {error}", path.display()))
 }
 
 fn pileup_error(path: &Path, error: PileupError) -> RsomicsError {
