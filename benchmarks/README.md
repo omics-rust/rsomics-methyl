@@ -2,8 +2,10 @@
 
 `generate_fixture.rs` creates a deterministic WGBS-like reference on the path
 given as its first argument and writes coordinate-sorted SAM to standard
-output. The record count is the number of alignments in `single` mode and the
-number of fragments in `paired` mode.
+output. The record count is the number of alignments in `single` and
+`targeted` modes and the number of fragments in `paired` mode. `targeted`
+creates 512-fold, 100-base islands separated by one kilobase and includes CG,
+CHG, and CHH reference contexts.
 
 Keep generated references, alignments, outputs, and build artifacts on the
 configured external volumes.
