@@ -4,11 +4,10 @@ use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
 use rsomics_common::{Result, RsomicsError};
 
 use crate::ReferenceStrand;
+use crate::alignment::{AlignmentFilter, invalid_record};
 use crate::context::{SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
-use crate::strand::{aux_integer, bisulfite_strand, invalid_read};
-
-const UNMAPPED: u16 = 0x4;
+use crate::strand::bisulfite_strand;
 
 #[derive(Clone, Debug)]
 pub struct PerReadOptions {
@@ -99,10 +98,19 @@ pub fn per_read(
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let filter = AlignmentFilter {
+        minimum_mapping_quality: options.minimum_mapping_quality,
+        ignore_flags: options.ignore_flags,
+        require_flags: options.require_flags,
+        reject_duplicates: false,
+        reject_singletons: false,
+        reject_discordant: false,
+        reject_multimappers: !options.ignore_nh,
+    };
     let mut caller = PerReadCaller {
         reference: indexed_reference,
         references,
-        options,
+        minimum_base_quality: options.minimum_base_quality,
     };
     let mut encoder = RawRecordEncoder::new();
     let mut stats = PerReadStats::default();
@@ -110,7 +118,7 @@ pub fn per_read(
         let record = result.map_err(|error| alignment_error(input, error))?;
         let record = encoder.encode(&header, record.as_ref())?;
         stats.input_records = checked_increment(stats.input_records, "input record")?;
-        if !caller.passes_filters(&record)? {
+        if !filter.passes(&record)? {
             stats.filtered_records = checked_increment(stats.filtered_records, "filtered record")?;
             continue;
         }
@@ -123,37 +131,18 @@ pub fn per_read(
 struct PerReadCaller {
     reference: IndexedReference,
     references: Vec<ReferenceSequence>,
-    options: PerReadOptions,
+    minimum_base_quality: u8,
 }
 
 impl PerReadCaller {
-    fn passes_filters(&self, record: &RawRecord) -> Result<bool> {
-        let flags = record.flags();
-        if flags & UNMAPPED != 0
-            || record.mapping_quality() < self.options.minimum_mapping_quality
-            || flags & self.options.ignore_flags != 0
-            || (self.options.require_flags != 0
-                && flags & self.options.require_flags != self.options.require_flags)
-        {
-            return Ok(false);
-        }
-        if !self.options.ignore_nh
-            && let Some(value) = aux_integer(record, *b"NH")?
-            && value > 1
-        {
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
     fn metric(&mut self, record: &RawRecord) -> Result<PerReadMetric> {
         let reference_id = usize::try_from(record.reference_sequence_id())
-            .map_err(|error| invalid_read(record, error))?;
+            .map_err(|error| invalid_record(record, error))?;
         let reference = self.references.get(reference_id).ok_or_else(|| {
-            invalid_read(record, format!("reference ID {reference_id} is absent"))
+            invalid_record(record, format!("reference ID {reference_id} is absent"))
         })?;
         let start = usize::try_from(record.alignment_start())
-            .map_err(|error| invalid_read(record, error))?;
+            .map_err(|error| invalid_record(record, error))?;
         let strand = bisulfite_strand(record)?;
         let mut query_position = 0usize;
         let mut reference_position = start;
@@ -161,19 +150,22 @@ impl PerReadCaller {
         let mut unmethylated = 0u64;
         for (kind, raw_length) in record.decoded_cigar()? {
             let length =
-                usize::try_from(raw_length).map_err(|error| invalid_read(record, error))?;
+                usize::try_from(raw_length).map_err(|error| invalid_record(record, error))?;
             match kind {
                 0 | 7 | 8 => {
                     for _ in 0..length {
                         if query_position >= record.sequence_len() {
-                            return Err(invalid_read(record, "CIGAR consumes beyond the sequence"));
+                            return Err(invalid_record(
+                                record,
+                                "CIGAR consumes beyond the sequence",
+                            ));
                         }
                         let quality = record
                             .quality_scores()
                             .get(query_position)
                             .copied()
                             .unwrap_or(u8::MAX);
-                        if quality >= self.options.minimum_base_quality
+                        if quality >= self.minimum_base_quality
                             && let Some(context) =
                                 classify(&mut self.reference, &reference.name, reference_position)?
                             && context.kind == SequenceContext::Cpg
@@ -202,7 +194,7 @@ impl PerReadCaller {
                 }
                 5 | 6 => {}
                 _ => {
-                    return Err(invalid_read(
+                    return Err(invalid_record(
                         record,
                         format!("unsupported CIGAR operation {kind}"),
                     ));
@@ -210,7 +202,7 @@ impl PerReadCaller {
             }
         }
         if query_position != record.sequence_len() {
-            return Err(invalid_read(
+            return Err(invalid_record(
                 record,
                 format!(
                     "CIGAR consumes {query_position} query bases instead of {}",
@@ -219,16 +211,16 @@ impl PerReadCaller {
             ));
         }
         let reference_length =
-            usize::try_from(reference.length).map_err(|error| invalid_read(record, error))?;
+            usize::try_from(reference.length).map_err(|error| invalid_record(record, error))?;
         if reference_position > reference_length {
-            return Err(invalid_read(record, "CIGAR extends beyond the reference"));
+            return Err(invalid_record(record, "CIGAR extends beyond the reference"));
         }
         let name = String::from_utf8(record.name().to_vec())
-            .map_err(|_| invalid_read(record, "read name is not UTF-8"))?;
+            .map_err(|_| invalid_record(record, "read name is not UTF-8"))?;
         Ok(PerReadMetric {
             name,
             chromosome: reference.name.clone(),
-            start: u64::try_from(start).map_err(|error| invalid_read(record, error))?,
+            start: u64::try_from(start).map_err(|error| invalid_record(record, error))?,
             methylated,
             unmethylated,
         })
@@ -238,7 +230,7 @@ impl PerReadCaller {
 fn checked_advance(position: usize, length: usize, record: &RawRecord) -> Result<usize> {
     position
         .checked_add(length)
-        .ok_or_else(|| invalid_read(record, "CIGAR coordinate overflows"))
+        .ok_or_else(|| invalid_record(record, "CIGAR coordinate overflows"))
 }
 
 fn checked_increment(value: u64, field: &str) -> Result<u64> {
@@ -319,7 +311,7 @@ mod tests {
                 name: "chr1".into(),
                 length: sequence.len() as u64,
             }],
-            options: PerReadOptions::default(),
+            minimum_base_quality: PerReadOptions::default().minimum_base_quality,
         };
         (directory, caller)
     }

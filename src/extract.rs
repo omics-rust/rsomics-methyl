@@ -5,15 +5,13 @@ use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
 use rsomics_common::{Result, RsomicsError};
 use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
 
+use crate::alignment::{AlignmentFilter, DUPLICATE};
 use crate::context::{ReferenceStrand, SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
-use crate::strand::{BisulfiteStrand, aux_integer, bisulfite_strand};
+use crate::strand::{BisulfiteStrand, bisulfite_strand};
 
 const PAIRED: u16 = 0x1;
-const PROPER_PAIR: u16 = 0x2;
-const UNMAPPED: u16 = 0x4;
 const MATE_UNMAPPED: u16 = 0x8;
-const DUPLICATE: u16 = 0x400;
 
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
@@ -232,6 +230,19 @@ pub fn extract(
     let references = indexed_reference.validate_header(&header)?;
     let lengths = references.iter().map(|reference| reference.length);
     let mut pileup = PileupEngine::new(lengths, PileupOptions::default());
+    let filter = AlignmentFilter {
+        minimum_mapping_quality: options.minimum_mapping_quality,
+        ignore_flags: if options.keep_duplicates {
+            options.ignore_flags & !DUPLICATE
+        } else {
+            options.ignore_flags
+        },
+        require_flags: options.require_flags,
+        reject_duplicates: !options.keep_duplicates,
+        reject_singletons: !options.keep_singletons,
+        reject_discordant: !options.keep_discordant,
+        reject_multimappers: !options.ignore_nh,
+    };
     let mut extractor = Extractor {
         reference: indexed_reference,
         references,
@@ -244,7 +255,7 @@ pub fn extract(
         let raw = encoder.encode(&header, record.as_ref())?;
         extractor.stats.input_records =
             checked_increment(extractor.stats.input_records, "input record")?;
-        if !passes_filters(&raw, &extractor.options)? {
+        if !filter.passes(&raw)? {
             extractor.stats.filtered_records =
                 checked_increment(extractor.stats.filtered_records, "filtered record")?;
             continue;
@@ -269,32 +280,6 @@ pub fn extract(
         Ok::<(), RsomicsError>(())
     })?;
     Ok(extractor.stats)
-}
-
-fn passes_filters(record: &RawRecord, options: &ExtractOptions) -> Result<bool> {
-    let flags = record.flags();
-    let ignored = if options.keep_duplicates {
-        options.ignore_flags & !DUPLICATE
-    } else {
-        options.ignore_flags | DUPLICATE
-    };
-    if flags & UNMAPPED != 0
-        || record.mapping_quality() < options.minimum_mapping_quality
-        || flags & ignored != 0
-        || (options.require_flags != 0 && flags & options.require_flags != options.require_flags)
-        || (!options.keep_singletons
-            && flags & (PAIRED | MATE_UNMAPPED) == (PAIRED | MATE_UNMAPPED))
-        || (!options.keep_discordant && flags & (PAIRED | PROPER_PAIR) == PAIRED)
-    {
-        return Ok(false);
-    }
-    if !options.ignore_nh
-        && let Some(value) = aux_integer(record, *b"NH")?
-        && value > 1
-    {
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 fn adjust_overlaps(evidence: &mut [Evidence<'_>]) {
