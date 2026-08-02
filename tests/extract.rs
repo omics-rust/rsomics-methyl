@@ -38,9 +38,9 @@ fn default_cpg_calls_match_methyldackel_golden() {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     assert_eq!(observed, expected);
-    assert_eq!(stats.input_records, 6);
+    assert_eq!(stats.input_records, 8);
     assert_eq!(stats.filtered_records, 3);
-    assert_eq!(stats.emitted_sites, 10);
+    assert_eq!(stats.emitted_sites, 20);
 }
 
 #[test]
@@ -60,6 +60,6 @@ fn stricter_mapq_filters_all_records() {
     )
     .unwrap();
     assert!(observed.is_empty());
-    assert_eq!(stats.input_records, 6);
+    assert_eq!(stats.input_records, 8);
     assert_eq!(stats.input_records, stats.filtered_records);
 }

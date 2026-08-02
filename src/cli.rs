@@ -57,6 +57,10 @@ struct ExtractArgs {
     #[arg(long, value_enum, default_value = "standard")]
     format: ExtractFormat,
 
+    /// Combine complementary CpG and CHG strand calls.
+    #[arg(long)]
+    merge_context: bool,
+
     /// Minimum alignment mapping quality.
     #[arg(short = 'q', long, default_value_t = 10)]
     minimum_mapping_quality: u8,
@@ -167,14 +171,15 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         &args.reference,
         &args.output_prefix,
         args.format,
+        args.merge_context,
         options,
     )?;
     Ok(ExecutionReport {
         operation: "extract",
         input_records: result.stats.input_records,
-        output_records: result.stats.emitted_sites,
+        output_records: result.output_records,
         filtered_records: result.stats.filtered_records,
-        merged_records: 0,
+        merged_records: result.merged_records,
         outputs: result
             .outputs
             .iter()

@@ -9,9 +9,10 @@ The source is under active reconstruction. The command tree currently exposes
 checked CpG/CHG/CHH extraction with context-specific transactional bedGraph
 or methylKit outputs and standalone context merging. Standard counts,
 fractions, total depth, logit, and methylKit representations are available.
-Bias, per-read, cytosine-report, region, trimming, conversion, and variant
-surfaces remain absent until their full behavior and compatibility gates are
-implemented.
+Complementary CpG and CHG strand calls can be merged before minimum-depth
+filtering. Bias, per-read, cytosine-report, region, trimming, conversion, and
+variant surfaces remain absent until their full behavior and compatibility
+gates are implemented.
 
 ```console
 rsomics-methyl extract reference.fa alignments.bam --output-prefix sample

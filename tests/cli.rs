@@ -86,6 +86,87 @@ fn alternative_extract_formats_match_methyldackel_goldens() {
 }
 
 #[test]
+fn merged_extract_formats_match_methyldackel_after_combined_depth_filtering() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for (format, suffix, expected_name) in [
+        ("standard", "_CpG.bedGraph", "expected.merged.bedGraph"),
+        (
+            "fraction",
+            "_CpG.meth.bedGraph",
+            "expected.merged.fraction.bedGraph",
+        ),
+        (
+            "counts",
+            "_CpG.counts.bedGraph",
+            "expected.merged.counts.bedGraph",
+        ),
+        (
+            "logit",
+            "_CpG.logit.bedGraph",
+            "expected.merged.logit.bedGraph",
+        ),
+    ] {
+        let prefix = directory.path().join(format!("merged-{format}"));
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args([
+                "extract",
+                fixture.join("synthetic.fa").to_str().unwrap(),
+                fixture.join("synthetic.bam").to_str().unwrap(),
+                "--output-prefix",
+                prefix.to_str().unwrap(),
+                "--format",
+                format,
+                "--minimum-depth",
+                "4",
+                "--merge-context",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{format}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed = std::fs::read_to_string(format!("{}{suffix}", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let expected = std::fs::read_to_string(fixture.join(expected_name))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected, "{format}");
+    }
+}
+
+#[test]
+fn methylkit_rejects_context_merging() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            directory.path().join("result").to_str().unwrap(),
+            "--format",
+            "methyl-kit",
+            "--merge-context",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("cannot merge complementary contexts")
+    );
+}
+
+#[test]
 fn failed_extract_preserves_every_existing_context_output() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -14,6 +15,8 @@ use crate::cli::ExtractFormat;
 
 pub struct ExtractOutputResult {
     pub stats: ExtractStats,
+    pub output_records: u64,
+    pub merged_records: u64,
     pub outputs: Vec<PathBuf>,
 }
 
@@ -22,21 +25,64 @@ pub fn extract_to_standard_outputs(
     reference: &Path,
     prefix: &Path,
     format: ExtractFormat,
-    options: ExtractOptions,
+    merge_context: bool,
+    mut options: ExtractOptions,
 ) -> Result<ExtractOutputResult> {
-    let mut outputs = ContextOutputs::new(prefix, input, reference, format, &options)?;
+    if merge_context && matches!(format, ExtractFormat::MethylKit) {
+        return Err(RsomicsError::ConfigError(
+            "methylKit output cannot merge complementary contexts".into(),
+        ));
+    }
+    let minimum_depth = options.minimum_depth;
+    if merge_context {
+        options.minimum_depth = 1;
+    }
+    let mut outputs = ContextOutputs::new(
+        prefix,
+        input,
+        reference,
+        format,
+        merge_context,
+        minimum_depth,
+        &options,
+    )?;
     let paths = outputs.paths();
     let stats = extract(input, reference, options, |metric| outputs.write(&metric))?;
-    outputs.commit()?;
+    let output_stats = outputs.commit()?;
     Ok(ExtractOutputResult {
         stats,
+        output_records: output_stats.output_records,
+        merged_records: output_stats.merged_records,
         outputs: paths,
     })
 }
 
 struct ContextOutputs {
     format: ExtractFormat,
+    merge_context: bool,
+    minimum_depth: u64,
+    stats: OutputStats,
     entries: Vec<OutputEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OutputStats {
+    output_records: u64,
+    merged_records: u64,
+}
+
+impl OutputStats {
+    fn add(&mut self, other: Self) -> Result<()> {
+        self.output_records = self
+            .output_records
+            .checked_add(other.output_records)
+            .ok_or_else(|| RsomicsError::InvalidInput("output record count overflows".into()))?;
+        self.merged_records = self
+            .merged_records
+            .checked_add(other.merged_records)
+            .ok_or_else(|| RsomicsError::InvalidInput("merged record count overflows".into()))?;
+        Ok(())
+    }
 }
 
 impl ContextOutputs {
@@ -45,6 +91,8 @@ impl ContextOutputs {
         input: &Path,
         reference: &Path,
         format: ExtractFormat,
+        merge_context: bool,
+        minimum_depth: u64,
         options: &ExtractOptions,
     ) -> Result<Self> {
         let mut entries = Vec::new();
@@ -71,10 +119,16 @@ impl ContextOutputs {
                 "at least one methylation context must be enabled".into(),
             ));
         }
-        let mut outputs = Self { format, entries };
+        let mut outputs = Self {
+            format,
+            merge_context,
+            minimum_depth,
+            stats: OutputStats::default(),
+            entries,
+        };
         for entry in &mut outputs.entries {
             let label = entry.label;
-            format.write_header(entry.file(), prefix, label)?;
+            format.write_header(entry.file(), prefix, label, merge_context)?;
         }
         Ok(outputs)
     }
@@ -87,16 +141,22 @@ impl ContextOutputs {
     }
 
     fn write(&mut self, metric: &SiteMetric) -> Result<()> {
+        let format = self.format;
+        let merge_context = self.merge_context;
+        let minimum_depth = self.minimum_depth;
         let entry = self
             .entries
             .iter_mut()
             .find(|entry| entry.context == metric.context())
             .ok_or_else(|| RsomicsError::ConfigError("methylation context has no output".into()))?;
-        self.format.write_metric(entry.file(), metric)
+        self.stats
+            .add(entry.push(format, merge_context, minimum_depth, metric)?)
     }
 
-    fn commit(mut self) -> Result<()> {
+    fn commit(mut self) -> Result<OutputStats> {
         for entry in &mut self.entries {
+            self.stats
+                .add(entry.finish(self.format, self.minimum_depth)?)?;
             entry.staged_mut().prepare()?;
         }
         for index in 0..self.entries.len() {
@@ -108,7 +168,7 @@ impl ContextOutputs {
                 return Err(self.restore(index, error));
             }
         }
-        Ok(())
+        Ok(self.stats)
     }
 
     fn restore(&mut self, through: usize, mut cause: RsomicsError) -> RsomicsError {
@@ -125,6 +185,8 @@ struct OutputEntry {
     path: PathBuf,
     context: SequenceContext,
     label: &'static str,
+    chromosome: Option<String>,
+    pending: BTreeMap<(u64, u64), OutputMetric>,
     staged: Option<Staged>,
     backup: Option<Backup>,
 }
@@ -137,6 +199,8 @@ impl OutputEntry {
             path,
             context,
             label,
+            chromosome: None,
+            pending: BTreeMap::new(),
             staged: Some(staged),
             backup: Some(backup),
         })
@@ -150,6 +214,163 @@ impl OutputEntry {
 
     fn file(&mut self) -> &mut fs::File {
         self.staged_mut().file()
+    }
+
+    fn push(
+        &mut self,
+        format: ExtractFormat,
+        merge_context: bool,
+        minimum_depth: u64,
+        metric: &SiteMetric,
+    ) -> Result<OutputStats> {
+        let mut stats = OutputStats::default();
+        let mut metric = OutputMetric::from(metric);
+        if !merge_context || metric.context == SequenceContext::Chh {
+            stats.add(self.write_metric(format, minimum_depth, metric)?)?;
+            return Ok(stats);
+        }
+        if self.chromosome.as_deref() != Some(metric.chromosome.as_str()) {
+            stats.add(self.flush_all(format, minimum_depth)?)?;
+            self.chromosome = Some(metric.chromosome.clone());
+        }
+        let position = metric.start;
+        metric.apply_merged_span()?;
+        let key = (metric.start, metric.end);
+        if let Some(existing) = self.pending.get_mut(&key) {
+            existing.merge(&metric)?;
+            stats.merged_records = 1;
+        } else {
+            self.pending.insert(key, metric);
+        }
+        let settled = position
+            .checked_add(1)
+            .ok_or_else(|| RsomicsError::InvalidInput("metric coordinate overflows".into()))?;
+        stats.add(self.flush_settled(format, minimum_depth, settled)?)?;
+        Ok(stats)
+    }
+
+    fn finish(&mut self, format: ExtractFormat, minimum_depth: u64) -> Result<OutputStats> {
+        self.flush_all(format, minimum_depth)
+    }
+
+    fn flush_settled(
+        &mut self,
+        format: ExtractFormat,
+        minimum_depth: u64,
+        settled: u64,
+    ) -> Result<OutputStats> {
+        let mut stats = OutputStats::default();
+        while self
+            .pending
+            .first_key_value()
+            .is_some_and(|(_, metric)| metric.end <= settled)
+        {
+            let (_, metric) = self
+                .pending
+                .pop_first()
+                .expect("pending output is present after inspection");
+            stats.add(self.write_metric(format, minimum_depth, metric)?)?;
+        }
+        Ok(stats)
+    }
+
+    fn flush_all(&mut self, format: ExtractFormat, minimum_depth: u64) -> Result<OutputStats> {
+        let mut stats = OutputStats::default();
+        while let Some((_, metric)) = self.pending.pop_first() {
+            stats.add(self.write_metric(format, minimum_depth, metric)?)?;
+        }
+        Ok(stats)
+    }
+
+    fn write_metric(
+        &mut self,
+        format: ExtractFormat,
+        minimum_depth: u64,
+        metric: OutputMetric,
+    ) -> Result<OutputStats> {
+        if metric.depth()? < minimum_depth {
+            return Ok(OutputStats::default());
+        }
+        format.write_metric(self.file(), &metric)?;
+        Ok(OutputStats {
+            output_records: 1,
+            merged_records: 0,
+        })
+    }
+}
+
+struct OutputMetric {
+    chromosome: String,
+    start: u64,
+    end: u64,
+    context: SequenceContext,
+    strand: ReferenceStrand,
+    methylated: u64,
+    unmethylated: u64,
+}
+
+impl From<&SiteMetric> for OutputMetric {
+    fn from(metric: &SiteMetric) -> Self {
+        Self {
+            chromosome: metric.chromosome().to_owned(),
+            start: metric.start(),
+            end: metric.end(),
+            context: metric.context(),
+            strand: metric.strand(),
+            methylated: metric.methylated(),
+            unmethylated: metric.unmethylated(),
+        }
+    }
+}
+
+impl OutputMetric {
+    fn depth(&self) -> Result<u64> {
+        self.methylated
+            .checked_add(self.unmethylated)
+            .ok_or_else(|| RsomicsError::InvalidInput("methylation depth overflows".into()))
+    }
+
+    fn percentage(&self) -> Result<u64> {
+        let depth = self.depth()?;
+        if depth == 0 {
+            Ok(0)
+        } else {
+            Ok((u128::from(self.methylated) * 100 / u128::from(depth)) as u64)
+        }
+    }
+
+    fn apply_merged_span(&mut self) -> Result<()> {
+        let offset = match self.context {
+            SequenceContext::Cpg => 1,
+            SequenceContext::Chg => 2,
+            SequenceContext::Chh => 0,
+        };
+        match self.strand {
+            ReferenceStrand::Forward => {
+                self.end = self
+                    .start
+                    .checked_add(offset + 1)
+                    .ok_or_else(|| RsomicsError::InvalidInput("context end overflows".into()))?;
+            }
+            ReferenceStrand::Reverse => {
+                self.start = self.start.checked_sub(offset).ok_or_else(|| {
+                    RsomicsError::InvalidInput("reverse context start underflows".into())
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &Self) -> Result<()> {
+        self.methylated = self
+            .methylated
+            .checked_add(other.methylated)
+            .ok_or_else(|| RsomicsError::InvalidInput("methylated count overflows".into()))?;
+        self.unmethylated = self
+            .unmethylated
+            .checked_add(other.unmethylated)
+            .ok_or_else(|| RsomicsError::InvalidInput("unmethylated count overflows".into()))?;
+        Ok(())
     }
 }
 
@@ -281,7 +502,13 @@ impl ExtractFormat {
         }
     }
 
-    fn write_header(self, writer: &mut fs::File, prefix: &Path, context: &str) -> Result<()> {
+    fn write_header(
+        self,
+        writer: &mut fs::File,
+        prefix: &Path,
+        context: &str,
+        merged: bool,
+    ) -> Result<()> {
         if matches!(self, Self::MethylKit) {
             writeln!(writer, "chrBase\tchr\tbase\tstrand\tcoverage\tfreqC\tfreqT")
                 .map_err(RsomicsError::Io)
@@ -293,61 +520,58 @@ impl ExtractFormat {
                 Self::Logit => "logit transformed methylation fractions",
                 Self::MethylKit => unreachable!(),
             };
+            let merged = if merged { " merged" } else { "" };
             writeln!(
                 writer,
-                "track type=\"bedGraph\" description=\"{} {context} {description}\"",
+                "track type=\"bedGraph\" description=\"{} {context}{merged} {description}\"",
                 prefix.display()
             )
             .map_err(RsomicsError::Io)
         }
     }
 
-    fn write_metric(self, writer: &mut fs::File, metric: &SiteMetric) -> Result<()> {
-        let depth = metric.depth();
-        let fraction = metric.methylated() as f64 / depth as f64;
+    fn write_metric(self, writer: &mut fs::File, metric: &OutputMetric) -> Result<()> {
+        let depth = metric.depth()?;
+        let fraction = metric.methylated as f64 / depth as f64;
         match self {
             Self::Standard => writeln!(
                 writer,
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                metric.chromosome(),
-                metric.start(),
-                metric.end(),
-                metric.percentage(),
-                metric.methylated(),
-                metric.unmethylated()
+                metric.chromosome,
+                metric.start,
+                metric.end,
+                metric.percentage()?,
+                metric.methylated,
+                metric.unmethylated
             ),
             Self::Fraction => writeln!(
                 writer,
                 "{}\t{}\t{}\t{fraction:.6}",
-                metric.chromosome(),
-                metric.start(),
-                metric.end()
+                metric.chromosome, metric.start, metric.end
             ),
             Self::Counts => writeln!(
                 writer,
                 "{}\t{}\t{}\t{depth}",
-                metric.chromosome(),
-                metric.start(),
-                metric.end()
+                metric.chromosome, metric.start, metric.end
             ),
             Self::Logit => writeln!(
                 writer,
                 "{}\t{}\t{}\t{:.6}",
-                metric.chromosome(),
-                metric.start(),
-                metric.end(),
+                metric.chromosome,
+                metric.start,
+                metric.end,
                 fraction.ln() - (-fraction).ln_1p()
             ),
             Self::MethylKit => {
-                let position = metric.end();
-                let strand = match metric.strand() {
+                let position = metric.end;
+                let strand = match metric.strand {
                     ReferenceStrand::Forward => 'F',
                     ReferenceStrand::Reverse => 'R',
                 };
                 writeln!(
                     writer,
                     "{0}.{1}\t{0}\t{1}\t{strand}\t{depth}\t{2:6.2}\t{3:6.2}",
-                    metric.chromosome(),
+                    metric.chromosome,
                     position,
                     fraction * 100.0,
                     (1.0 - fraction) * 100.0
@@ -385,6 +609,8 @@ mod tests {
             Path::new("input.bam"),
             Path::new("reference.fa"),
             ExtractFormat::Standard,
+            false,
+            1,
             &ExtractOptions {
                 chg: true,
                 ..ExtractOptions::default()
