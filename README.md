@@ -5,11 +5,11 @@ extraction and bias QC. It consolidates the team-owned historical
 `rsomics-methyldackel` implementation into one product family with
 MethylDackel compatibility gates.
 
-The source is under active reconstruction. The command tree currently exposes
-checked CpG/CHG/CHH extraction with context-specific transactional bedGraph
-or methylKit outputs, exhaustive cytosine reports, positional M-bias TSV/SVG
-reports, standalone context merging, and per-alignment CpG metrics. Standard
-counts, fractions, total depth, logit, and methylKit representations are
+The command tree exposes checked CpG/CHG/CHH extraction with context-specific
+transactional bedGraph or methylKit outputs, exhaustive cytosine reports,
+positional M-bias TSV/SVG reports, standalone context merging, and
+per-alignment CpG metrics. Standard counts, fractions, total depth, logit, and
+methylKit representations are
 available. Complementary CpG and CHG strand calls can be merged before
 minimum-depth filtering. Indexed 1-based inclusive region selection is shared
 by extraction, M-bias, and per-read reporting. Extraction and M-bias share
