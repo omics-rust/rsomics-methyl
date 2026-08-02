@@ -86,6 +86,20 @@ struct ExtractArgs {
     /// Minimum methylated plus unmethylated depth; exhaustive reports include zero depth.
     #[arg(short = 'd', long, default_value_t = 1)]
     minimum_depth: u64,
+
+    #[command(flatten)]
+    variants: VariantFilterArgs,
+}
+
+#[derive(Debug, Args)]
+struct VariantFilterArgs {
+    /// Minimum usable opposite-strand depth before testing a site.
+    #[arg(long, visible_alias = "minOppositeDepth", default_value_t = 0)]
+    minimum_opposite_depth: u64,
+
+    /// Largest allowed non-reference fraction on the opposite strand.
+    #[arg(long, visible_alias = "maxVariantFrac", default_value_t = 0.0)]
+    maximum_variant_fraction: f64,
 }
 
 #[derive(Debug, Args)]
@@ -307,6 +321,7 @@ pub struct ExecutionReport {
     input_records: u64,
     output_records: u64,
     filtered_records: u64,
+    excluded_variant_sites: u64,
     merged_records: u64,
     outputs: Vec<String>,
 }
@@ -354,6 +369,7 @@ fn execute_per_read(args: PerReadArgs, json: bool) -> Result<ExecutionReport> {
         input_records: stats.input_records,
         output_records: stats.output_records,
         filtered_records: stats.filtered_records,
+        excluded_variant_sites: 0,
         merged_records: 0,
         outputs: vec![
             args.output
@@ -402,6 +418,8 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         minimum_mapping_quality: filters.minimum_mapping_quality,
         minimum_base_quality: filters.minimum_base_quality,
         minimum_conversion_efficiency: filters.minimum_conversion_efficiency,
+        minimum_opposite_depth: args.variants.minimum_opposite_depth,
+        maximum_variant_fraction: args.variants.maximum_variant_fraction,
         ignore_flags: filters.ignore_flags,
         require_flags: filters.require_flags,
         keep_duplicates: filters.keep_duplicates,
@@ -426,6 +444,7 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         input_records: result.stats.input_records,
         output_records: result.output_records,
         filtered_records: result.stats.filtered_records,
+        excluded_variant_sites: result.stats.excluded_variant_sites,
         merged_records: result.merged_records,
         outputs: result
             .outputs
@@ -466,6 +485,7 @@ fn execute_mbias(args: MbiasArgs) -> Result<ExecutionReport> {
         input_records: result.stats.input_records,
         output_records: result.metrics,
         filtered_records: result.stats.filtered_records,
+        excluded_variant_sites: 0,
         merged_records: 0,
         outputs: result
             .outputs
@@ -506,6 +526,7 @@ fn report(stats: MergeContextStats, output: Option<&Path>) -> ExecutionReport {
         input_records: stats.input_records,
         output_records: stats.output_records,
         filtered_records: 0,
+        excluded_variant_sites: 0,
         merged_records: stats.merged_records,
         outputs: vec![output.map_or_else(|| "stdout".into(), |path| path.display().to_string())],
     }

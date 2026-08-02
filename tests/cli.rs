@@ -947,3 +947,192 @@ fn conversion_filter_matches_live_extract_and_mbias_goldens() {
         );
     }
 }
+
+#[test]
+fn opposite_strand_variant_filter_matches_live_goldens() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/variant");
+    let directory = tempfile::tempdir().unwrap();
+    for (fraction, expected, alias) in [
+        ("0.35", "expected.filtered.bedGraph", true),
+        ("0.6", "expected.retained.bedGraph", false),
+    ] {
+        let prefix = directory.path().join(fraction);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"));
+        command.args([
+            "extract",
+            fixture.join("reference.fa").to_str().unwrap(),
+            fixture.join("input.bam").to_str().unwrap(),
+            "--chg",
+            "--minimum-opposite-depth",
+            "4",
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ]);
+        if alias {
+            command.args(["--maxVariantFrac", fraction]);
+        } else {
+            command.args(["--maximum-variant-fraction", fraction]);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed = std::fs::read_to_string(format!("{}_CpG.bedGraph", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            observed,
+            std::fs::read_to_string(fixture.join(expected)).unwrap()
+        );
+        let observed = std::fs::read_to_string(format!("{}_CHG.bedGraph", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            observed,
+            std::fs::read_to_string(fixture.join(expected.replace(".bedGraph", ".CHG.bedGraph")))
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn variant_filter_matches_all_context_goldens() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/conversion");
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("contexts");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("reference.fa").to_str().unwrap(),
+            fixture.join("input.bam").to_str().unwrap(),
+            "--chg",
+            "--chh",
+            "--minimum-opposite-depth",
+            "4",
+            "--maximum-variant-fraction",
+            "0.35",
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for context in ["CpG", "CHG", "CHH"] {
+        let observed = std::fs::read_to_string(format!("{}_{context}.bedGraph", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            observed,
+            std::fs::read_to_string(fixture.join(format!("expected.variant.{context}.bedGraph")))
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn variant_filter_applies_documented_boundaries_and_merged_exclusion() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/variant");
+    let directory = tempfile::tempdir().unwrap();
+    for (label, depth, fraction, expected) in [
+        ("equal", "4", "0.25", "expected.filtered.bedGraph"),
+        ("unknown", "4", "0.45", "expected.filtered.bedGraph"),
+        ("depth", "5", "0.35", "expected.retained.bedGraph"),
+    ] {
+        let prefix = directory.path().join(label);
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args([
+                "extract",
+                fixture.join("reference.fa").to_str().unwrap(),
+                fixture.join("input.bam").to_str().unwrap(),
+                "--minOppositeDepth",
+                depth,
+                "--maximum-variant-fraction",
+                fraction,
+                "--output-prefix",
+                prefix.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let observed = std::fs::read_to_string(format!("{}_CpG.bedGraph", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            observed,
+            std::fs::read_to_string(fixture.join(expected)).unwrap()
+        );
+    }
+
+    let merged = directory.path().join("merged");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("reference.fa").to_str().unwrap(),
+            fixture.join("input.bam").to_str().unwrap(),
+            "--chg",
+            "--minimum-opposite-depth",
+            "4",
+            "--maximum-variant-fraction",
+            "0.35",
+            "--merge-context",
+            "--output-prefix",
+            merged.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    for context in ["CpG", "CHG"] {
+        assert_eq!(
+            std::fs::read_to_string(format!("{}_{context}.bedGraph", merged.display()))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    let report = directory.path().join("report");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("reference.fa").to_str().unwrap(),
+            fixture.join("input.bam").to_str().unwrap(),
+            "--minimum-opposite-depth",
+            "4",
+            "--maximum-variant-fraction",
+            "0.35",
+            "--cytosine-report",
+            "--output-prefix",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        std::fs::read(format!("{}.cytosine_report.txt", report.display())).unwrap(),
+        std::fs::read(fixture.join("expected.cytosine-report.tsv")).unwrap()
+    );
+}

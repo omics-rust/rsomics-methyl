@@ -1,4 +1,4 @@
-use rsomics_methyl::extract::{ExtractOptions, SiteMetric, extract};
+use rsomics_methyl::extract::{ExtractEvent, ExtractOptions, SiteMetric, extract, extract_events};
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -62,4 +62,38 @@ fn stricter_mapq_filters_all_records() {
     assert!(observed.is_empty());
     assert_eq!(stats.input_records, 8);
     assert_eq!(stats.input_records, stats.filtered_records);
+}
+
+#[test]
+fn variant_events_report_the_usable_opposite_strand_evidence() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/variant");
+    let mut events = Vec::new();
+    let stats = extract_events(
+        &fixture.join("input.bam"),
+        &fixture.join("reference.fa"),
+        ExtractOptions {
+            minimum_opposite_depth: 4,
+            maximum_variant_fraction: 0.35,
+            ..ExtractOptions::default()
+        },
+        |event| {
+            events.push(event);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.excluded_variant_sites, 1);
+    assert_eq!(stats.emitted_sites, 1);
+    let ExtractEvent::ExcludedVariant(excluded) = &events[0] else {
+        panic!("first event should exclude the forward cytosine");
+    };
+    assert_eq!(excluded.start(), 0);
+    assert_eq!(excluded.opposite_depth(), 4);
+    assert_eq!(excluded.variant_bases(), 2);
+    let ExtractEvent::Site(metric) = &events[1] else {
+        panic!("second event should retain the reverse cytosine");
+    };
+    assert_eq!(metric.start(), 1);
+    assert_eq!(metric.methylated(), 5);
 }

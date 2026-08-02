@@ -9,6 +9,9 @@ suggestions, and exhaustive cytosine-context orientation are adapted from its
 `MBias.c`, `svg.c`, and `extract.c` modules. BED strand-to-bisulfite-strand
 mapping follows its `bed.c`, `extract.c`, and `MBias.c` behavior.
 Non-CpG conversion-efficiency filtering follows its `common.c` contract.
+Opposite-strand variant evidence and merged-context exclusion follow its
+`extract.c` contract with the documented boundary, unknown-base, and symmetry
+corrections recorded in the fixture provenance.
 
 The historical Rust implementation and fixtures are team-owned. Adapted
 algorithms retain this provenance; the rsomics implementation is licensed

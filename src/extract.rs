@@ -28,6 +28,8 @@ pub struct ExtractOptions {
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
     pub minimum_conversion_efficiency: f64,
+    pub minimum_opposite_depth: u64,
+    pub maximum_variant_fraction: f64,
     pub ignore_flags: u16,
     pub require_flags: u16,
     pub keep_duplicates: bool,
@@ -50,6 +52,8 @@ impl Default for ExtractOptions {
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
             minimum_conversion_efficiency: 0.0,
+            minimum_opposite_depth: 0,
+            maximum_variant_fraction: 0.0,
             ignore_flags: 0x0f00,
             require_flags: 0,
             keep_duplicates: false,
@@ -74,6 +78,48 @@ pub struct SiteMetric {
     trinucleotide: [u8; 3],
     methylated: u64,
     unmethylated: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExcludedVariantSite {
+    chromosome: String,
+    start: u64,
+    context: SequenceContext,
+    strand: ReferenceStrand,
+    opposite_depth: u64,
+    variant_bases: u64,
+}
+
+impl ExcludedVariantSite {
+    pub fn chromosome(&self) -> &str {
+        &self.chromosome
+    }
+
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    pub fn context(&self) -> SequenceContext {
+        self.context
+    }
+
+    pub fn strand(&self) -> ReferenceStrand {
+        self.strand
+    }
+
+    pub fn opposite_depth(&self) -> u64 {
+        self.opposite_depth
+    }
+
+    pub fn variant_bases(&self) -> u64 {
+        self.variant_bases
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtractEvent {
+    Site(SiteMetric),
+    ExcludedVariant(ExcludedVariantSite),
 }
 
 impl SiteMetric {
@@ -129,6 +175,7 @@ pub struct ExtractStats {
     pub filtered_records: u64,
     pub examined_columns: u64,
     pub emitted_sites: u64,
+    pub excluded_variant_sites: u64,
 }
 
 struct Extractor {
@@ -136,6 +183,7 @@ struct Extractor {
     references: Vec<ReferenceSequence>,
     selection: Option<ReferenceRange>,
     bed: Option<BedSelection>,
+    variant_filter: Option<VariantFilter>,
     options: ExtractOptions,
     exhaustive: bool,
     report_reference_id: usize,
@@ -147,7 +195,7 @@ impl Extractor {
     fn visit_column(
         &mut self,
         column: &Column<'_>,
-        emit: &mut impl FnMut(SiteMetric) -> Result<()>,
+        emit: &mut impl FnMut(ExtractEvent) -> Result<()>,
     ) -> Result<()> {
         let reference_id = usize::try_from(column.reference_id()).map_err(invalid_coordinate)?;
         let position = u64::try_from(column.position()).map_err(invalid_coordinate)?;
@@ -165,8 +213,8 @@ impl Extractor {
         if self.exhaustive {
             self.emit_until(reference_id, position, emit)?;
         }
-        if let Some(metric) = self.column(column, reference_id, position)? {
-            emit(metric)?;
+        if let Some(event) = self.column(column, reference_id, position)? {
+            emit(event)?;
         }
         if self.exhaustive {
             self.report_reference_id = reference_id;
@@ -177,7 +225,7 @@ impl Extractor {
         Ok(())
     }
 
-    fn emit_remaining(&mut self, emit: &mut impl FnMut(SiteMetric) -> Result<()>) -> Result<()> {
+    fn emit_remaining(&mut self, emit: &mut impl FnMut(ExtractEvent) -> Result<()>) -> Result<()> {
         if !self.exhaustive {
             return Ok(());
         }
@@ -197,7 +245,7 @@ impl Extractor {
         &mut self,
         reference_id: usize,
         position: u64,
-        emit: &mut impl FnMut(SiteMetric) -> Result<()>,
+        emit: &mut impl FnMut(ExtractEvent) -> Result<()>,
     ) -> Result<()> {
         while self.report_reference_id < reference_id {
             let end = self
@@ -220,11 +268,11 @@ impl Extractor {
     fn emit_current_range(
         &mut self,
         end: u64,
-        emit: &mut impl FnMut(SiteMetric) -> Result<()>,
+        emit: &mut impl FnMut(ExtractEvent) -> Result<()>,
     ) -> Result<()> {
         while self.report_position < end {
             if let Some(metric) = self.zero_metric()? {
-                emit(metric)?;
+                emit(ExtractEvent::Site(metric))?;
             }
             self.report_position = self
                 .report_position
@@ -275,7 +323,7 @@ impl Extractor {
         column: &Column<'_>,
         reference_id: usize,
         raw_position: u64,
-    ) -> Result<Option<SiteMetric>> {
+    ) -> Result<Option<ExtractEvent>> {
         self.stats.examined_columns = checked_increment(self.stats.examined_columns, "column")?;
         let reference = self.references.get(reference_id).ok_or_else(|| {
             RsomicsError::InvalidInput(format!("pileup reference ID {reference_id} is absent"))
@@ -326,10 +374,19 @@ impl Extractor {
         adjust_overlaps(&mut evidence);
         let mut methylated = 0u64;
         let mut unmethylated = 0u64;
+        let mut opposite = OppositeEvidence::default();
         for value in evidence {
             if value.quality < self.options.minimum_base_quality
-                || value.strand.is_top() != (context.strand == ReferenceStrand::Forward)
+                || self.bed.as_ref().is_some_and(|selection| {
+                    !selection.contains(reference_id, raw_position, value.strand.is_top())
+                })
             {
+                continue;
+            }
+            if value.strand.is_top() != (context.strand == ReferenceStrand::Forward) {
+                if self.variant_filter.is_some() {
+                    opposite.observe(value.strand, value.base)?;
+                }
                 continue;
             }
             match (value.strand.is_top(), value.base) {
@@ -345,12 +402,27 @@ impl Extractor {
         let depth = methylated
             .checked_add(unmethylated)
             .ok_or_else(|| RsomicsError::InvalidInput("methylation depth overflows".into()))?;
+        if self
+            .variant_filter
+            .is_some_and(|filter| filter.excludes(opposite))
+        {
+            self.stats.excluded_variant_sites =
+                checked_increment(self.stats.excluded_variant_sites, "excluded variant site")?;
+            return Ok(Some(ExtractEvent::ExcludedVariant(ExcludedVariantSite {
+                chromosome: reference.name.clone(),
+                start: raw_position,
+                context: context.kind,
+                strand: context.strand,
+                opposite_depth: opposite.depth,
+                variant_bases: opposite.variant_bases,
+            })));
+        }
         if !self.exhaustive && depth < self.options.minimum_depth {
             return Ok(None);
         }
         self.stats.emitted_sites = checked_increment(self.stats.emitted_sites, "site")?;
         let start = u64::try_from(position).map_err(invalid_coordinate)?;
-        Ok(Some(SiteMetric {
+        Ok(Some(ExtractEvent::Site(SiteMetric {
             chromosome: reference.name.clone(),
             start,
             end: start
@@ -361,7 +433,7 @@ impl Extractor {
             trinucleotide: context.trinucleotide,
             methylated,
             unmethylated,
-        }))
+        })))
     }
 
     fn includes(&self, context: SequenceContext) -> bool {
@@ -380,11 +452,69 @@ struct Evidence<'a> {
     strand: BisulfiteStrand,
 }
 
+#[derive(Clone, Copy)]
+struct VariantFilter {
+    minimum_depth: u64,
+    maximum_fraction: f64,
+}
+
+impl VariantFilter {
+    fn new(minimum_depth: u64, maximum_fraction: f64) -> Result<Option<Self>> {
+        if !maximum_fraction.is_finite() || !(0.0..=1.0).contains(&maximum_fraction) {
+            return Err(RsomicsError::ConfigError(
+                "maximum variant fraction must be between 0 and 1".into(),
+            ));
+        }
+        Ok((minimum_depth > 0).then_some(Self {
+            minimum_depth,
+            maximum_fraction,
+        }))
+    }
+
+    fn excludes(self, evidence: OppositeEvidence) -> bool {
+        evidence.depth >= self.minimum_depth
+            && evidence.variant_bases as f64 / evidence.depth as f64 > self.maximum_fraction
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct OppositeEvidence {
+    depth: u64,
+    variant_bases: u64,
+}
+
+impl OppositeEvidence {
+    fn observe(&mut self, strand: BisulfiteStrand, base: u8) -> Result<()> {
+        if base == 15 {
+            return Ok(());
+        }
+        self.depth = checked_increment(self.depth, "opposite-strand depth")?;
+        let expected = if strand.is_top() { 4 } else { 2 };
+        if base != expected {
+            self.variant_bases = checked_increment(self.variant_bases, "opposite-strand variant")?;
+        }
+        Ok(())
+    }
+}
+
 pub fn extract(
     input: &Path,
     reference: &Path,
     options: ExtractOptions,
     emit: impl FnMut(SiteMetric) -> Result<()>,
+) -> Result<ExtractStats> {
+    let mut emit = emit;
+    extract_with_mode(input, reference, options, false, |event| match event {
+        ExtractEvent::Site(metric) => emit(metric),
+        ExtractEvent::ExcludedVariant(_) => Ok(()),
+    })
+}
+
+pub fn extract_events(
+    input: &Path,
+    reference: &Path,
+    options: ExtractOptions,
+    emit: impl FnMut(ExtractEvent) -> Result<()>,
 ) -> Result<ExtractStats> {
     extract_with_mode(input, reference, options, false, emit)
 }
@@ -395,7 +525,11 @@ pub fn extract_all_cytosines(
     options: ExtractOptions,
     emit: impl FnMut(SiteMetric) -> Result<()>,
 ) -> Result<ExtractStats> {
-    extract_with_mode(input, reference, options, true, emit)
+    let mut emit = emit;
+    extract_with_mode(input, reference, options, true, |event| match event {
+        ExtractEvent::Site(metric) => emit(metric),
+        ExtractEvent::ExcludedVariant(_) => Ok(()),
+    })
 }
 
 fn extract_with_mode(
@@ -403,7 +537,7 @@ fn extract_with_mode(
     reference: &Path,
     options: ExtractOptions,
     exhaustive: bool,
-    mut emit: impl FnMut(SiteMetric) -> Result<()>,
+    mut emit: impl FnMut(ExtractEvent) -> Result<()>,
 ) -> Result<ExtractStats> {
     if options.minimum_base_quality == 0 {
         return Err(RsomicsError::ConfigError(
@@ -411,6 +545,10 @@ fn extract_with_mode(
         ));
     }
     validate_conversion_efficiency(options.minimum_conversion_efficiency)?;
+    let variant_filter = VariantFilter::new(
+        options.minimum_opposite_depth,
+        options.maximum_variant_fraction,
+    )?;
     if !options.cpg && !options.chg && !options.chh {
         return Err(RsomicsError::ConfigError(
             "at least one methylation context must be enabled".into(),
@@ -467,6 +605,7 @@ fn extract_with_mode(
         references,
         selection: selection.as_ref().map(|selection| selection.range),
         bed,
+        variant_filter,
         options,
         exhaustive,
         report_reference_id,
@@ -587,6 +726,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_variant_fractions() {
+        for value in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+            assert!(VariantFilter::new(1, value).is_err());
+        }
+    }
+
+    #[test]
     fn exhaustive_scan_crosses_reference_boundaries() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reference.fa");
@@ -610,6 +756,7 @@ mod tests {
             ],
             selection: None,
             bed: None,
+            variant_filter: None,
             options: ExtractOptions {
                 cpg: false,
                 chg: true,
@@ -623,7 +770,10 @@ mod tests {
         };
         let mut observed = Vec::new();
         extractor
-            .emit_remaining(&mut |metric| {
+            .emit_remaining(&mut |event| {
+                let ExtractEvent::Site(metric) = event else {
+                    panic!("zero-coverage scan emitted a variant event");
+                };
                 observed.push((
                     metric.chromosome().to_owned(),
                     metric.start(),

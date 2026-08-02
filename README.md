@@ -18,8 +18,8 @@ operations accept plain or gzip-compressed BED selection. With
 `--keep-bed-strand`, BED `+` selects top-strand and `-` bottom-strand evidence;
 per-read selection uses the complete alignment span. Extraction and M-bias
 also share read-level non-CpG conversion-efficiency filtering. Opposite-strand
-variant filtering remains absent until its full behavior and compatibility
-gates are implemented.
+depth and non-reference fractions can exclude likely variant cytosines during
+extraction, including their complete merged CpG or CHG context.
 
 ```console
 rsomics-methyl extract reference.fa alignments.bam --output-prefix sample --region chr1:1-1000000

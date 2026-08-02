@@ -1,0 +1,21 @@
+@HD	VN:1.6	SO:coordinate
+@SQ	SN:chrVariant	LN:2
+@SQ	SN:chrChg	LN:3
+top-clean-1	0	chrVariant	1	60	2M	*	0	0	CG	II	XG:Z:CT	NH:i:1
+top-clean-2	0	chrVariant	1	60	2M	*	0	0	CG	II	XG:Z:CT	NH:i:1
+top-clean-3	0	chrVariant	1	60	2M	*	0	0	CG	II	XG:Z:CT	NH:i:1
+top-variant	0	chrVariant	1	60	2M	*	0	0	CA	II	XG:Z:CT	NH:i:1
+bottom-clean-1	16	chrVariant	1	60	2M	*	0	0	CG	II	XG:Z:GA	NH:i:1
+bottom-clean-2	16	chrVariant	1	60	2M	*	0	0	CG	II	XG:Z:GA	NH:i:1
+bottom-variant-1	16	chrVariant	1	60	2M	*	0	0	TG	II	XG:Z:GA	NH:i:1
+bottom-variant-2	16	chrVariant	1	60	2M	*	0	0	TG	II	XG:Z:GA	NH:i:1
+bottom-unknown	16	chrVariant	1	60	2M	*	0	0	NG	II	XG:Z:GA	NH:i:1
+chg-top-clean-1	0	chrChg	1	60	3M	*	0	0	CAG	III	XG:Z:CT	NH:i:1
+chg-top-clean-2	0	chrChg	1	60	3M	*	0	0	CAG	III	XG:Z:CT	NH:i:1
+chg-top-clean-3	0	chrChg	1	60	3M	*	0	0	CAG	III	XG:Z:CT	NH:i:1
+chg-top-variant	0	chrChg	1	60	3M	*	0	0	CAA	III	XG:Z:CT	NH:i:1
+chg-bottom-clean-1	16	chrChg	1	60	3M	*	0	0	CAG	III	XG:Z:GA	NH:i:1
+chg-bottom-clean-2	16	chrChg	1	60	3M	*	0	0	CAG	III	XG:Z:GA	NH:i:1
+chg-bottom-variant-1	16	chrChg	1	60	3M	*	0	0	TAG	III	XG:Z:GA	NH:i:1
+chg-bottom-variant-2	16	chrChg	1	60	3M	*	0	0	TAG	III	XG:Z:GA	NH:i:1
+chg-bottom-unknown	16	chrChg	1	60	3M	*	0	0	NAG	III	XG:Z:GA	NH:i:1

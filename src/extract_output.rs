@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use rsomics_common::{Result, RsomicsError, reject_output_alias};
 use rsomics_methyl::extract::{
-    ExtractOptions, ExtractStats, SiteMetric, extract, extract_all_cytosines,
+    ExcludedVariantSite, ExtractEvent, ExtractOptions, ExtractStats, SiteMetric, extract,
+    extract_all_cytosines, extract_events,
 };
 use rsomics_methyl::{ReferenceStrand, SequenceContext};
 
@@ -120,7 +121,13 @@ pub fn extract_to_outputs(
         &options,
     )?;
     let paths = outputs.paths();
-    let stats = extract(input, reference, options, |metric| outputs.write(&metric))?;
+    let stats = if merge_context {
+        extract_events(input, reference, options, |event| {
+            outputs.write_event(&event)
+        })?
+    } else {
+        extract(input, reference, options, |metric| outputs.write(&metric))?
+    };
     let output_stats = outputs.commit()?;
     Ok(ExtractOutputResult {
         stats,
@@ -229,6 +236,24 @@ impl ContextOutputs {
             .add(entry.push(format, merge_context, minimum_depth, metric)?)
     }
 
+    fn write_event(&mut self, event: &ExtractEvent) -> Result<()> {
+        match event {
+            ExtractEvent::Site(metric) => self.write(metric),
+            ExtractEvent::ExcludedVariant(site) => {
+                let format = self.format;
+                let minimum_depth = self.minimum_depth;
+                let entry = self
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.context == site.context())
+                    .ok_or_else(|| {
+                        RsomicsError::ConfigError("methylation context has no output".into())
+                    })?;
+                self.stats.add(entry.exclude(format, minimum_depth, site)?)
+            }
+        }
+    }
+
     fn commit(mut self) -> Result<OutputStats> {
         for entry in &mut self.entries {
             self.stats
@@ -244,6 +269,7 @@ struct OutputEntry {
     label: &'static str,
     chromosome: Option<String>,
     pending: BTreeMap<(u64, u64), OutputMetric>,
+    excluded: BTreeSet<(u64, u64)>,
     output: TransactionalOutput,
 }
 
@@ -255,6 +281,7 @@ impl OutputEntry {
             label,
             chromosome: None,
             pending: BTreeMap::new(),
+            excluded: BTreeSet::new(),
             output,
         })
     }
@@ -283,12 +310,41 @@ impl OutputEntry {
         let position = metric.start;
         metric.apply_merged_span()?;
         let key = (metric.start, metric.end);
-        if let Some(existing) = self.pending.get_mut(&key) {
-            existing.merge(&metric)?;
-            stats.merged_records = 1;
-        } else {
-            self.pending.insert(key, metric);
+        if !self.excluded.contains(&key) {
+            if let Some(existing) = self.pending.get_mut(&key) {
+                existing.merge(&metric)?;
+                stats.merged_records = 1;
+            } else {
+                self.pending.insert(key, metric);
+            }
         }
+        let settled = position
+            .checked_add(1)
+            .ok_or_else(|| RsomicsError::InvalidInput("metric coordinate overflows".into()))?;
+        stats.add(self.flush_settled(format, minimum_depth, settled)?)?;
+        Ok(stats)
+    }
+
+    fn exclude(
+        &mut self,
+        format: ExtractFormat,
+        minimum_depth: u64,
+        site: &ExcludedVariantSite,
+    ) -> Result<OutputStats> {
+        if site.context() == SequenceContext::Chh {
+            return Ok(OutputStats::default());
+        }
+        let mut stats = OutputStats::default();
+        if self.chromosome.as_deref() != Some(site.chromosome()) {
+            stats.add(self.flush_all(format, minimum_depth)?)?;
+            self.chromosome = Some(site.chromosome().to_owned());
+        }
+        let mut metric = OutputMetric::from_variant(site)?;
+        let position = metric.start;
+        metric.apply_merged_span()?;
+        let key = (metric.start, metric.end);
+        self.pending.remove(&key);
+        self.excluded.insert(key);
         let settled = position
             .checked_add(1)
             .ok_or_else(|| RsomicsError::InvalidInput("metric coordinate overflows".into()))?;
@@ -318,6 +374,7 @@ impl OutputEntry {
                 .expect("pending output is present after inspection");
             stats.add(self.write_metric(format, minimum_depth, metric)?)?;
         }
+        self.excluded.retain(|(_, end)| *end > settled);
         Ok(stats)
     }
 
@@ -326,6 +383,7 @@ impl OutputEntry {
         while let Some((_, metric)) = self.pending.pop_first() {
             stats.add(self.write_metric(format, minimum_depth, metric)?)?;
         }
+        self.excluded.clear();
         Ok(stats)
     }
 
@@ -371,6 +429,21 @@ impl From<&SiteMetric> for OutputMetric {
 }
 
 impl OutputMetric {
+    fn from_variant(site: &ExcludedVariantSite) -> Result<Self> {
+        Ok(Self {
+            chromosome: site.chromosome().to_owned(),
+            start: site.start(),
+            end: site
+                .start()
+                .checked_add(1)
+                .ok_or_else(|| RsomicsError::InvalidInput("site end overflows".into()))?,
+            context: site.context(),
+            strand: site.strand(),
+            methylated: 0,
+            unmethylated: 0,
+        })
+    }
+
     fn depth(&self) -> Result<u64> {
         self.methylated
             .checked_add(self.unmethylated)
