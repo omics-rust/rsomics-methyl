@@ -27,11 +27,11 @@ clap = { version = "4", features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 itoa = "1"
 noodles = { version = "0.110", features = ["core", "fasta", "sam"] }
-rsomics-bamio = "0.7"
+rsomics-bamio = "0.8"
 rsomics-common = "0.12"
 rsomics-help = "0.4"
 rsomics-intervals = "0.3"
-rsomics-pileup = "0.7"
+rsomics-pileup = "0.8"
 serde = { version = "1", features = ["derive"] }
 smallvec = "1"
 tempfile = "3"
