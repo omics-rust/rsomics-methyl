@@ -3,6 +3,7 @@ use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use noodles::core::Region;
 use rsomics_common::{
     OutputArgs, Result, RsomicsError, ToolMeta, reject_output_alias, write_output,
 };
@@ -52,6 +53,10 @@ struct ExtractArgs {
 
     /// Coordinate-sorted indexed BAM or CRAM.
     input: PathBuf,
+
+    /// Reference region using 1-based inclusive coordinates.
+    #[arg(short = 'r', long)]
+    region: Option<Region>,
 
     /// Prefix for transactional context-specific bedGraph outputs.
     #[arg(short, long)]
@@ -144,6 +149,10 @@ struct PerReadArgs {
     /// Coordinate-sorted indexed BAM or CRAM.
     input: PathBuf,
 
+    /// Reference region using 1-based inclusive coordinates.
+    #[arg(short = 'r', long)]
+    region: Option<Region>,
+
     /// Transactional output; omit or use - for standard output.
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -199,6 +208,7 @@ fn execute_per_read(args: PerReadArgs, json: bool) -> Result<ExecutionReport> {
         reject_output_alias(output, [args.reference.as_path(), args.input.as_path()])?;
     }
     let options = PerReadOptions {
+        region: args.region,
         minimum_mapping_quality: args.minimum_mapping_quality,
         minimum_base_quality: args.minimum_base_quality,
         ignore_flags: args.ignore_flags,
@@ -249,6 +259,7 @@ fn write_per_read(writer: &mut dyn Write, metric: &PerReadMetric) -> Result<()> 
 
 fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
     let options = ExtractOptions {
+        region: args.region,
         minimum_mapping_quality: args.minimum_mapping_quality,
         minimum_base_quality: args.minimum_base_quality,
         ignore_flags: args.ignore_flags,

@@ -7,6 +7,7 @@ pub mod extract;
 pub mod merge_context;
 pub mod per_read;
 mod reference;
+mod selection;
 mod strand;
 
 pub use context::{ReferenceStrand, SequenceContext};

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use noodles::core::Region;
 use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
 use rsomics_common::{Result, RsomicsError};
 use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
@@ -8,6 +9,7 @@ use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
 use crate::alignment::{AlignmentFilter, DUPLICATE};
 use crate::context::{ReferenceStrand, SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
+use crate::selection::{AlignmentRecordResult, ReferenceRange, alignment_records, resolve_region};
 use crate::strand::{BisulfiteStrand, bisulfite_strand};
 
 const PAIRED: u16 = 0x1;
@@ -15,6 +17,7 @@ const MATE_UNMAPPED: u16 = 0x8;
 
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
+    pub region: Option<Region>,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
     pub ignore_flags: u16,
@@ -32,6 +35,7 @@ pub struct ExtractOptions {
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
+            region: None,
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
             ignore_flags: 0x0f00,
@@ -113,18 +117,26 @@ pub struct ExtractStats {
 struct Extractor {
     reference: IndexedReference,
     references: Vec<ReferenceSequence>,
+    selection: Option<ReferenceRange>,
     options: ExtractOptions,
     stats: ExtractStats,
 }
 
 impl Extractor {
     fn column(&mut self, column: &Column<'_>) -> Result<Option<SiteMetric>> {
-        self.stats.examined_columns = checked_increment(self.stats.examined_columns, "column")?;
         let reference_id = usize::try_from(column.reference_id()).map_err(invalid_coordinate)?;
+        let raw_position = u64::try_from(column.position()).map_err(invalid_coordinate)?;
+        if self
+            .selection
+            .is_some_and(|selection| !selection.contains(reference_id, raw_position))
+        {
+            return Ok(None);
+        }
+        self.stats.examined_columns = checked_increment(self.stats.examined_columns, "column")?;
         let reference = self.references.get(reference_id).ok_or_else(|| {
             RsomicsError::InvalidInput(format!("pileup reference ID {reference_id} is absent"))
         })?;
-        let position = usize::try_from(column.position()).map_err(invalid_coordinate)?;
+        let position = usize::try_from(raw_position).map_err(invalid_coordinate)?;
         let Some(context) = classify(&mut self.reference, &reference.name, position)? else {
             return Ok(None);
         };
@@ -228,6 +240,11 @@ pub fn extract(
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let selection = options
+        .region
+        .as_ref()
+        .map(|region| resolve_region(&references, region))
+        .transpose()?;
     let lengths = references.iter().map(|reference| reference.length);
     let mut pileup = PileupEngine::new(lengths, PileupOptions::default());
     let filter = AlignmentFilter {
@@ -246,11 +263,12 @@ pub fn extract(
     let mut extractor = Extractor {
         reference: indexed_reference,
         references,
+        selection: selection.as_ref().map(|selection| selection.range),
         options,
         stats: ExtractStats::default(),
     };
     let mut encoder = RawRecordEncoder::new();
-    for result in reader.records(&header) {
+    let mut process = |result: AlignmentRecordResult| -> Result<()> {
         let record = result.map_err(|error| alignment_error(input, error))?;
         let raw = encoder.encode(&header, record.as_ref())?;
         extractor.stats.input_records =
@@ -258,7 +276,7 @@ pub fn extract(
         if !filter.passes(&raw)? {
             extractor.stats.filtered_records =
                 checked_increment(extractor.stats.filtered_records, "filtered record")?;
-            continue;
+            return Ok(());
         }
         pileup
             .push(raw)
@@ -269,6 +287,12 @@ pub fn extract(
             }
             Ok::<(), RsomicsError>(())
         })?;
+        Ok(())
+    };
+    let records = alignment_records(&mut reader, &header, selection.as_ref())
+        .map_err(|error| alignment_error(input, error))?;
+    for result in records {
+        process(result)?;
     }
     pileup
         .finish()

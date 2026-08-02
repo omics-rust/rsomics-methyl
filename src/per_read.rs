@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use noodles::core::Region;
 use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
 use rsomics_common::{Result, RsomicsError};
 
@@ -7,10 +8,12 @@ use crate::ReferenceStrand;
 use crate::alignment::{AlignmentFilter, invalid_record};
 use crate::context::{SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
+use crate::selection::{AlignmentRecordResult, alignment_records, resolve_region};
 use crate::strand::bisulfite_strand;
 
 #[derive(Clone, Debug)]
 pub struct PerReadOptions {
+    pub region: Option<Region>,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
     pub ignore_flags: u16,
@@ -21,6 +24,7 @@ pub struct PerReadOptions {
 impl Default for PerReadOptions {
     fn default() -> Self {
         Self {
+            region: None,
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
             ignore_flags: 0,
@@ -98,6 +102,11 @@ pub fn per_read(
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let selection = options
+        .region
+        .as_ref()
+        .map(|region| resolve_region(&references, region))
+        .transpose()?;
     let filter = AlignmentFilter {
         minimum_mapping_quality: options.minimum_mapping_quality,
         ignore_flags: options.ignore_flags,
@@ -114,16 +123,31 @@ pub fn per_read(
     };
     let mut encoder = RawRecordEncoder::new();
     let mut stats = PerReadStats::default();
-    for result in reader.records(&header) {
+    let mut process = |result: AlignmentRecordResult| -> Result<()> {
         let record = result.map_err(|error| alignment_error(input, error))?;
         let record = encoder.encode(&header, record.as_ref())?;
+        if let Some(selection) = &selection {
+            let reference_id = usize::try_from(record.reference_sequence_id())
+                .map_err(|error| invalid_record(&record, error))?;
+            let start = u64::try_from(record.alignment_start())
+                .map_err(|error| invalid_record(&record, error))?;
+            if !selection.range.contains(reference_id, start) {
+                return Ok(());
+            }
+        }
         stats.input_records = checked_increment(stats.input_records, "input record")?;
         if !filter.passes(&record)? {
             stats.filtered_records = checked_increment(stats.filtered_records, "filtered record")?;
-            continue;
+            return Ok(());
         }
         emit(caller.metric(&record)?)?;
         stats.output_records = checked_increment(stats.output_records, "output record")?;
+        Ok(())
+    };
+    let records = alignment_records(&mut reader, &header, selection.as_ref())
+        .map_err(|error| alignment_error(input, error))?;
+    for result in records {
+        process(result)?;
     }
     Ok(stats)
 }

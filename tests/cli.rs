@@ -39,6 +39,46 @@ fn extract_cli_matches_methyldackel_golden() {
 }
 
 #[test]
+fn extract_region_bounds_the_reported_sites() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("region");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+            "--region",
+            "chrSynthetic:5-10",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let lines = std::fs::read_to_string(directory.path().join("region_CpG.bedGraph"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected = std::fs::read_to_string(fixture.join("expected.bedGraph"))
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let start = line.split('\t').nth(1).unwrap().parse::<u64>().unwrap();
+            (4..10).contains(&start)
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(lines, expected);
+}
+
+#[test]
 fn alternative_extract_formats_match_methyldackel_goldens() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();
@@ -209,6 +249,70 @@ fn per_read_matches_the_documented_methyldackel_contract() {
             .unwrap()
             .contains("multimapper\tchrSynthetic\t0\t100.000000\t10\n")
     );
+}
+
+#[test]
+fn per_read_region_requires_the_alignment_start_inside_the_interval() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let included = directory.path().join("included.tsv");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "per-read",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output",
+            included.to_str().unwrap(),
+            "--region",
+            "chrSynthetic:1-1",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        std::fs::read(included).unwrap(),
+        std::fs::read(fixture.join("expected.per-read.tsv")).unwrap()
+    );
+
+    let excluded = directory.path().join("excluded.tsv");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "per-read",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output",
+            excluded.to_str().unwrap(),
+            "--region",
+            "chrSynthetic:2-10",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(std::fs::read(excluded).unwrap().is_empty());
+}
+
+#[test]
+fn region_rejects_unknown_and_outside_references() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for region in ["missing", "chrSynthetic:31"] {
+        let output = directory
+            .path()
+            .join(format!("{}.tsv", region.replace(':', "-")));
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args([
+                "per-read",
+                fixture.join("synthetic.fa").to_str().unwrap(),
+                fixture.join("synthetic.bam").to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--region",
+                region,
+            ])
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{region}");
+    }
 }
 
 #[test]
