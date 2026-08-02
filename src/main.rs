@@ -1,4 +1,5 @@
 mod cli;
+mod extract_output;
 
 use cli::{Cli, META};
 

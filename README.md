@@ -5,9 +5,16 @@ extraction and bias QC. It consolidates the team-owned historical
 `rsomics-methyldackel` implementation into one product family with
 MethylDackel compatibility gates.
 
-The source is under active reconstruction. Only operations present in the
-command tree are implemented; future extraction, bias, and per-read surfaces
-are not exposed as placeholders.
+The source is under active reconstruction. The command tree currently exposes
+checked CpG/CHG/CHH extraction with context-specific transactional bedGraph
+outputs and standalone context merging. Bias, per-read, alternative-output,
+region, trimming, conversion, and variant surfaces remain absent until their
+full behavior and compatibility gates are implemented.
+
+```console
+rsomics-methyl extract reference.fa alignments.bam --output-prefix sample
+rsomics-methyl merge-context reference.fa sample_CpG.bedGraph --output merged.bedGraph
+```
 
 ## License
 
