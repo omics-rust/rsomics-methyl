@@ -4,6 +4,7 @@
 mod context;
 pub mod extract;
 pub mod merge_context;
+pub mod per_read;
 mod reference;
 mod strand;
 

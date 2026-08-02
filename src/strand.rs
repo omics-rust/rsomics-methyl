@@ -73,3 +73,59 @@ pub(crate) fn bisulfite_strand(record: &RawRecord) -> Result<BisulfiteStrand> {
         )))
     }
 }
+
+pub(crate) fn aux_integer(record: &RawRecord, tag: [u8; 2]) -> Result<Option<i64>> {
+    let Some(kind) = record.aux_type(tag) else {
+        return Ok(None);
+    };
+    let invalid = || {
+        invalid_read(
+            record,
+            format!(
+                "{}{} has invalid integer encoding",
+                char::from(tag[0]),
+                char::from(tag[1])
+            ),
+        )
+    };
+    let value = record.aux_value(tag).ok_or_else(invalid)?;
+    let integer = match kind {
+        b'c' => value
+            .first()
+            .map(|value| i64::from(i8::from_le_bytes([*value]))),
+        b'C' => value.first().map(|value| i64::from(*value)),
+        b's' => value
+            .get(..2)
+            .and_then(|value| <[u8; 2]>::try_from(value).ok())
+            .map(i16::from_le_bytes)
+            .map(i64::from),
+        b'S' => value
+            .get(..2)
+            .and_then(|value| <[u8; 2]>::try_from(value).ok())
+            .map(u16::from_le_bytes)
+            .map(i64::from),
+        b'i' => value
+            .get(..4)
+            .and_then(|value| <[u8; 4]>::try_from(value).ok())
+            .map(i32::from_le_bytes)
+            .map(i64::from),
+        b'I' => value
+            .get(..4)
+            .and_then(|value| <[u8; 4]>::try_from(value).ok())
+            .map(u32::from_le_bytes)
+            .map(i64::from),
+        _ => return Err(invalid()),
+    };
+    let integer = integer.ok_or_else(invalid)?;
+    if integer < 0 {
+        return Err(invalid_read(record, "NH must be nonnegative"));
+    }
+    Ok(Some(integer))
+}
+
+pub(crate) fn invalid_read(record: &RawRecord, error: impl std::fmt::Display) -> RsomicsError {
+    RsomicsError::InvalidInput(format!(
+        "read {}: {error}",
+        String::from_utf8_lossy(record.name())
+    ))
+}

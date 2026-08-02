@@ -167,6 +167,71 @@ fn methylkit_rejects_context_merging() {
 }
 
 #[test]
+fn per_read_matches_the_documented_methyldackel_contract() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("per-read.tsv");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "per-read",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read(output).unwrap(),
+        std::fs::read(fixture.join("expected.per-read.tsv")).unwrap()
+    );
+
+    let output = directory.path().join("per-read-all.tsv");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "per-read",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--ignore-nh",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(
+        std::fs::read_to_string(output)
+            .unwrap()
+            .contains("multimapper\tchrSynthetic\t0\t100.000000\t10\n")
+    );
+}
+
+#[test]
+fn failed_per_read_preserves_existing_output() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("per-read.tsv");
+    std::fs::write(&output, b"keep\n").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "per-read",
+            directory.path().join("missing.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(output).unwrap(), b"keep\n");
+}
+
+#[test]
 fn failed_extract_preserves_every_existing_context_output() {
     let fixture = extract_fixture();
     let directory = tempfile::tempdir().unwrap();

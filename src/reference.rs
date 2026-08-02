@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 pub(crate) struct IndexedReference {
     reader: fasta::io::IndexedReader<fasta::io::BufReader<File>>,
     path: PathBuf,
+    lengths: HashMap<Vec<u8>, u64>,
     chromosome: Vec<u8>,
     sequence_start: usize,
     sequence: Vec<u8>,
@@ -22,9 +24,25 @@ impl IndexedReference {
         let reader = fasta::io::indexed_reader::Builder::default()
             .build_from_path(path)
             .map_err(|error| Self::path_error(path, error))?;
+        let mut lengths = HashMap::new();
+        for record in reader.index().as_ref() {
+            if lengths
+                .insert(record.name().to_vec(), record.length())
+                .is_some()
+            {
+                return Err(Self::path_error(
+                    path,
+                    format!(
+                        "duplicate reference {} in FASTA index",
+                        String::from_utf8_lossy(record.name())
+                    ),
+                ));
+            }
+        }
         Ok(Self {
             reader,
             path: path.to_path_buf(),
+            lengths,
             chromosome: Vec::new(),
             sequence_start: 0,
             sequence: Vec::new(),
@@ -32,12 +50,9 @@ impl IndexedReference {
     }
 
     pub(crate) fn length(&self, chromosome: &str) -> Result<u64> {
-        self.reader
-            .index()
-            .as_ref()
-            .iter()
-            .find(|record| record.name() == chromosome.as_bytes())
-            .map(fasta::fai::Record::length)
+        self.lengths
+            .get(chromosome.as_bytes())
+            .copied()
             .ok_or_else(|| self.error(format!("unknown chromosome {chromosome}")))
     }
 
@@ -125,4 +140,23 @@ impl IndexedReference {
 pub(crate) struct ReferenceSequence {
     pub(crate) name: String,
     pub(crate) length: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_duplicate_fasta_index_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.fa");
+        std::fs::write(&path, b">chr1\nA\n").unwrap();
+        std::fs::write(
+            directory.path().join("reference.fa.fai"),
+            b"chr1\t1\t6\t1\t2\nchr1\t1\t6\t1\t2\n",
+        )
+        .unwrap();
+
+        assert!(IndexedReference::open(&path).is_err());
+    }
 }

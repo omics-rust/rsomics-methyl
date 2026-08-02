@@ -7,7 +7,7 @@ use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
 
 use crate::context::{ReferenceStrand, SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
-use crate::strand::{BisulfiteStrand, bisulfite_strand};
+use crate::strand::{BisulfiteStrand, aux_integer, bisulfite_strand};
 
 const PAIRED: u16 = 0x1;
 const PROPER_PAIR: u16 = 0x2;
@@ -297,55 +297,6 @@ fn passes_filters(record: &RawRecord, options: &ExtractOptions) -> Result<bool> 
     Ok(true)
 }
 
-fn aux_integer(record: &RawRecord, tag: [u8; 2]) -> Result<Option<i64>> {
-    let Some(kind) = record.aux_type(tag) else {
-        return Ok(None);
-    };
-    let invalid = || {
-        invalid_read(
-            record,
-            format!(
-                "{}{} has invalid integer encoding",
-                char::from(tag[0]),
-                char::from(tag[1])
-            ),
-        )
-    };
-    let value = record.aux_value(tag).ok_or_else(invalid)?;
-    let integer = match kind {
-        b'c' => value
-            .first()
-            .map(|value| i64::from(i8::from_le_bytes([*value]))),
-        b'C' => value.first().map(|value| i64::from(*value)),
-        b's' => value
-            .get(..2)
-            .and_then(|value| <[u8; 2]>::try_from(value).ok())
-            .map(i16::from_le_bytes)
-            .map(i64::from),
-        b'S' => value
-            .get(..2)
-            .and_then(|value| <[u8; 2]>::try_from(value).ok())
-            .map(u16::from_le_bytes)
-            .map(i64::from),
-        b'i' => value
-            .get(..4)
-            .and_then(|value| <[u8; 4]>::try_from(value).ok())
-            .map(i32::from_le_bytes)
-            .map(i64::from),
-        b'I' => value
-            .get(..4)
-            .and_then(|value| <[u8; 4]>::try_from(value).ok())
-            .map(u32::from_le_bytes)
-            .map(i64::from),
-        _ => return Err(invalid()),
-    };
-    let integer = integer.ok_or_else(invalid)?;
-    if integer < 0 {
-        return Err(invalid_read(record, "NH must be nonnegative"));
-    }
-    Ok(Some(integer))
-}
-
 fn adjust_overlaps(evidence: &mut [Evidence<'_>]) {
     let mut pending = HashMap::<&[u8], usize>::new();
     for index in 0..evidence.len() {
@@ -399,13 +350,6 @@ fn checked_increment(value: u64, field: &str) -> Result<u64> {
 
 fn invalid_coordinate(error: impl std::fmt::Display) -> RsomicsError {
     RsomicsError::InvalidInput(format!("invalid pileup coordinate: {error}"))
-}
-
-fn invalid_read(record: &RawRecord, error: impl std::fmt::Display) -> RsomicsError {
-    RsomicsError::InvalidInput(format!(
-        "read {}: {error}",
-        String::from_utf8_lossy(record.name())
-    ))
 }
 
 fn alignment_error(path: &Path, error: impl std::fmt::Display) -> RsomicsError {

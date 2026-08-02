@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -8,6 +8,7 @@ use rsomics_common::{
 };
 use rsomics_methyl::extract::ExtractOptions;
 use rsomics_methyl::merge_context::{MergeContextStats, merge_context};
+use rsomics_methyl::per_read::{PerReadMetric, PerReadOptions, per_read};
 use serde::Serialize;
 
 use crate::extract_output::extract_to_standard_outputs;
@@ -39,6 +40,9 @@ enum Command {
 
     /// Merge strand-specific CpG and CHG cytosine metrics.
     MergeContext(MergeContextArgs),
+
+    /// Report CpG methylation evidence for each alignment record.
+    PerRead(PerReadArgs),
 }
 
 #[derive(Debug, Args)]
@@ -132,6 +136,39 @@ struct MergeContextArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct PerReadArgs {
+    /// Indexed reference FASTA.
+    reference: PathBuf,
+
+    /// Coordinate-sorted indexed BAM or CRAM.
+    input: PathBuf,
+
+    /// Transactional output; omit or use - for standard output.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Minimum alignment mapping quality.
+    #[arg(short = 'q', long, default_value_t = 10)]
+    minimum_mapping_quality: u8,
+
+    /// Minimum base quality; must be positive.
+    #[arg(short = 'p', long, default_value_t = 5)]
+    minimum_base_quality: u8,
+
+    /// SAM flag bits that exclude a record when any are set.
+    #[arg(short = 'F', long, default_value_t = 0)]
+    ignore_flags: u16,
+
+    /// SAM flag bits that must all be set.
+    #[arg(short = 'R', long, default_value_t = 0)]
+    require_flags: u16,
+
+    /// Include records with NH greater than one.
+    #[arg(long)]
+    ignore_nh: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ExecutionReport {
     operation: &'static str,
@@ -147,8 +184,67 @@ impl Cli {
         match self.command {
             Command::Extract(args) => execute_extract(args),
             Command::MergeContext(args) => execute_merge_context(args, self.output.json),
+            Command::PerRead(args) => execute_per_read(args, self.output.json),
         }
     }
+}
+
+fn execute_per_read(args: PerReadArgs, json: bool) -> Result<ExecutionReport> {
+    if json && is_stdout(args.output.as_deref()) {
+        return Err(RsomicsError::ConfigError(
+            "--json requires a named per-read output".into(),
+        ));
+    }
+    if let Some(output) = args.output.as_deref() {
+        reject_output_alias(output, [args.reference.as_path(), args.input.as_path()])?;
+    }
+    let options = PerReadOptions {
+        minimum_mapping_quality: args.minimum_mapping_quality,
+        minimum_base_quality: args.minimum_base_quality,
+        ignore_flags: args.ignore_flags,
+        require_flags: args.require_flags,
+        ignore_nh: args.ignore_nh,
+    };
+    let stats = write_output(args.output.as_deref(), |writer| {
+        per_read(&args.input, &args.reference, options, |metric| {
+            write_per_read(writer, &metric)
+        })
+    })?;
+    Ok(ExecutionReport {
+        operation: "per-read",
+        input_records: stats.input_records,
+        output_records: stats.output_records,
+        filtered_records: stats.filtered_records,
+        merged_records: 0,
+        outputs: vec![
+            args.output
+                .as_deref()
+                .map_or_else(|| "stdout".into(), |path| path.display().to_string()),
+        ],
+    })
+}
+
+fn write_per_read(writer: &mut dyn Write, metric: &PerReadMetric) -> Result<()> {
+    if metric.informative_bases() == 0 {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t0.0\t0",
+            metric.name(),
+            metric.chromosome(),
+            metric.start()
+        )
+    } else {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{:.6}\t{}",
+            metric.name(),
+            metric.chromosome(),
+            metric.start(),
+            metric.percentage(),
+            metric.informative_bases()
+        )
+    }
+    .map_err(RsomicsError::Io)
 }
 
 fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
