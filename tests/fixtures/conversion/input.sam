@@ -1,0 +1,10 @@
+@HD	VN:1.6	SO:coordinate
+@SQ	SN:chrConversion	LN:12
+top-efficient	0	chrConversion	1	60	12M	*	0	0	TAACGTAGTGAA	IIIIIIIIIIII	XG:Z:CT	NH:i:1
+top-half	0	chrConversion	1	60	12M	*	0	0	CAACGTAGTGAA	IIIIIIIIIIII	XG:Z:CT	NH:i:1
+top-fail	0	chrConversion	1	60	12M	*	0	0	CAACGCAGTGAA	IIIIIIIIIIII	XG:Z:CT	NH:i:1
+top-none	0	chrConversion	1	60	12M	*	0	0	AAACGAAGTGAA	IIIIIIIIIIII	XG:Z:CT	NH:i:1
+bottom-efficient	16	chrConversion	1	60	12M	*	0	0	CAACGCAATAAA	IIIIIIIIIIII	XG:Z:GA	NH:i:1
+bottom-half	16	chrConversion	1	60	12M	*	0	0	CAACGCAGTAAA	IIIIIIIIIIII	XG:Z:GA	NH:i:1
+bottom-fail	16	chrConversion	1	60	12M	*	0	0	CAACGCAGTGAA	IIIIIIIIIIII	XG:Z:GA	NH:i:1
+bottom-none	16	chrConversion	1	60	12M	*	0	0	CAACGCATTTAA	IIIIIIIIIIII	XG:Z:GA	NH:i:1

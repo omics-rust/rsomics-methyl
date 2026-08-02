@@ -16,9 +16,10 @@ by extraction, M-bias, and per-read reporting. Extraction and M-bias share
 strand- and read-specific inclusion bounds and fixed-end trimming. All three
 operations accept plain or gzip-compressed BED selection. With
 `--keep-bed-strand`, BED `+` selects top-strand and `-` bottom-strand evidence;
-per-read selection uses the complete alignment span. Conversion and variant
-surfaces remain absent until their full behavior and compatibility gates are
-implemented.
+per-read selection uses the complete alignment span. Extraction and M-bias
+also share read-level non-CpG conversion-efficiency filtering. Opposite-strand
+variant filtering remains absent until its full behavior and compatibility
+gates are implemented.
 
 ```console
 rsomics-methyl extract reference.fa alignments.bam --output-prefix sample --region chr1:1-1000000

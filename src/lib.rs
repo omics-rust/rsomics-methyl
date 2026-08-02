@@ -5,6 +5,7 @@ mod alignment;
 mod bed;
 mod calling;
 mod context;
+mod conversion;
 pub mod extract;
 pub mod mbias;
 pub mod merge_context;

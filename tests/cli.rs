@@ -886,3 +886,64 @@ fn invalid_bed_preserves_per_read_output() {
     assert!(!result.status.success());
     assert_eq!(std::fs::read(output).unwrap(), b"keep\n");
 }
+
+#[test]
+fn conversion_filter_matches_live_extract_and_mbias_goldens() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/conversion");
+    let directory = tempfile::tempdir().unwrap();
+    for threshold in ["0.5", "0.75"] {
+        let prefix = directory.path().join(threshold);
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args([
+                "extract",
+                fixture.join("reference.fa").to_str().unwrap(),
+                fixture.join("input.bam").to_str().unwrap(),
+                "--minConversionEfficiency",
+                threshold,
+                "--output-prefix",
+                prefix.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed = std::fs::read_to_string(format!("{}_CpG.bedGraph", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            observed,
+            std::fs::read_to_string(fixture.join(format!("expected.{threshold}.bedGraph")))
+                .unwrap()
+        );
+
+        let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+            .args([
+                "mbias",
+                fixture.join("reference.fa").to_str().unwrap(),
+                fixture.join("input.bam").to_str().unwrap(),
+                "--minimum-conversion-efficiency",
+                threshold,
+                "--output-prefix",
+                prefix.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read(format!("{}_mbias.tsv", prefix.display())).unwrap(),
+            std::fs::read(fixture.join(format!("expected.{threshold}.mbias.tsv"))).unwrap()
+        );
+    }
+}

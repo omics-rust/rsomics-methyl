@@ -9,6 +9,7 @@ use crate::alignment::{AlignmentFilter, DUPLICATE};
 use crate::bed::BedSelection;
 use crate::calling::AlignmentCaller;
 use crate::context::SequenceContext;
+use crate::conversion::{ConversionFilter, validate_conversion_efficiency};
 use crate::reference::IndexedReference;
 use crate::selection::{alignment_records, resolve_region};
 use crate::strand::BisulfiteStrand;
@@ -22,6 +23,7 @@ pub struct MbiasOptions {
     pub trimming: TrimmingOptions,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
+    pub minimum_conversion_efficiency: f64,
     pub ignore_flags: u16,
     pub require_flags: u16,
     pub keep_duplicates: bool,
@@ -42,6 +44,7 @@ impl Default for MbiasOptions {
             trimming: TrimmingOptions::default(),
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
+            minimum_conversion_efficiency: 0.0,
             ignore_flags: 0x0f00,
             require_flags: 0,
             keep_duplicates: false,
@@ -156,6 +159,7 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
             "minimum base quality must be positive".into(),
         ));
     }
+    validate_conversion_efficiency(options.minimum_conversion_efficiency)?;
     if !options.cpg && !options.chg && !options.chh {
         return Err(RsomicsError::ConfigError(
             "at least one methylation context must be enabled".into(),
@@ -172,6 +176,12 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let mut conversion = ConversionFilter::new(
+        reference,
+        references.clone(),
+        options.minimum_base_quality,
+        options.minimum_conversion_efficiency,
+    )?;
     let bed = options
         .bed
         .as_deref()
@@ -207,6 +217,12 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
         let record = encoder.encode(&header, record.as_ref())?;
         stats.input_records = increment(stats.input_records, "input record")?;
         if !filter.passes(&record)? {
+            stats.filtered_records = increment(stats.filtered_records, "filtered record")?;
+            continue;
+        }
+        if let Some(conversion) = conversion.as_mut()
+            && !conversion.passes(&record)?
+        {
             stats.filtered_records = increment(stats.filtered_records, "filtered record")?;
             continue;
         }

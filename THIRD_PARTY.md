@@ -8,6 +8,7 @@ The positional count contract, Agresti-Coull interval, inclusion-bound
 suggestions, and exhaustive cytosine-context orientation are adapted from its
 `MBias.c`, `svg.c`, and `extract.c` modules. BED strand-to-bisulfite-strand
 mapping follows its `bed.c`, `extract.c`, and `MBias.c` behavior.
+Non-CpG conversion-efficiency filtering follows its `common.c` contract.
 
 The historical Rust implementation and fixtures are team-owned. Adapted
 algorithms retain this provenance; the rsomics implementation is licensed

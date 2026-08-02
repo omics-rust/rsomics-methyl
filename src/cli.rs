@@ -101,6 +101,10 @@ struct PileupFilterArgs {
     #[arg(short = 'p', long, default_value_t = 5)]
     minimum_base_quality: u8,
 
+    /// Minimum converted fraction among informative non-CpG cytosines.
+    #[arg(long, visible_alias = "minConversionEfficiency", default_value_t = 0.0)]
+    minimum_conversion_efficiency: f64,
+
     /// SAM flag bits that exclude a record when any are set.
     #[arg(short = 'F', long, default_value_t = 0x0f00)]
     ignore_flags: u16,
@@ -397,6 +401,7 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
         trimming,
         minimum_mapping_quality: filters.minimum_mapping_quality,
         minimum_base_quality: filters.minimum_base_quality,
+        minimum_conversion_efficiency: filters.minimum_conversion_efficiency,
         ignore_flags: filters.ignore_flags,
         require_flags: filters.require_flags,
         keep_duplicates: filters.keep_duplicates,
@@ -444,6 +449,7 @@ fn execute_mbias(args: MbiasArgs) -> Result<ExecutionReport> {
             trimming,
             minimum_mapping_quality: filters.minimum_mapping_quality,
             minimum_base_quality: filters.minimum_base_quality,
+            minimum_conversion_efficiency: filters.minimum_conversion_efficiency,
             ignore_flags: filters.ignore_flags,
             require_flags: filters.require_flags,
             keep_duplicates: filters.keep_duplicates,

@@ -10,6 +10,7 @@ use crate::alignment::{AlignmentFilter, DUPLICATE};
 use crate::bed::BedSelection;
 use crate::calling::read_number;
 use crate::context::{ReferenceStrand, SequenceContext, classify};
+use crate::conversion::{ConversionFilter, validate_conversion_efficiency};
 use crate::reference::{IndexedReference, ReferenceSequence};
 use crate::selection::{AlignmentRecordResult, ReferenceRange, alignment_records, resolve_region};
 use crate::strand::{BisulfiteStrand, bisulfite_strand};
@@ -26,6 +27,7 @@ pub struct ExtractOptions {
     pub trimming: TrimmingOptions,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
+    pub minimum_conversion_efficiency: f64,
     pub ignore_flags: u16,
     pub require_flags: u16,
     pub keep_duplicates: bool,
@@ -47,6 +49,7 @@ impl Default for ExtractOptions {
             trimming: TrimmingOptions::default(),
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
+            minimum_conversion_efficiency: 0.0,
             ignore_flags: 0x0f00,
             require_flags: 0,
             keep_duplicates: false,
@@ -407,6 +410,7 @@ fn extract_with_mode(
             "minimum base quality must be positive".into(),
         ));
     }
+    validate_conversion_efficiency(options.minimum_conversion_efficiency)?;
     if !options.cpg && !options.chg && !options.chh {
         return Err(RsomicsError::ConfigError(
             "at least one methylation context must be enabled".into(),
@@ -423,6 +427,12 @@ fn extract_with_mode(
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let mut conversion = ConversionFilter::new(
+        reference,
+        references.clone(),
+        options.minimum_base_quality,
+        options.minimum_conversion_efficiency,
+    )?;
     let bed = options
         .bed
         .as_deref()
@@ -469,7 +479,11 @@ fn extract_with_mode(
         let raw = encoder.encode(&header, record.as_ref())?;
         extractor.stats.input_records =
             checked_increment(extractor.stats.input_records, "input record")?;
-        if !filter.passes(&raw)? {
+        let mut passes = filter.passes(&raw)?;
+        if passes && let Some(conversion) = conversion.as_mut() {
+            passes = conversion.passes(&raw)?;
+        }
+        if !passes {
             extractor.stats.filtered_records =
                 checked_increment(extractor.stats.filtered_records, "filtered record")?;
             return Ok(());
