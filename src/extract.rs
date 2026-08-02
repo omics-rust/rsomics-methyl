@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use noodles::core::Region;
 use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
@@ -7,6 +7,7 @@ use rsomics_common::{Result, RsomicsError};
 use rsomics_pileup::{Column, PileupEngine, PileupError, PileupOptions};
 
 use crate::alignment::{AlignmentFilter, DUPLICATE};
+use crate::bed::BedSelection;
 use crate::calling::read_number;
 use crate::context::{ReferenceStrand, SequenceContext, classify};
 use crate::reference::{IndexedReference, ReferenceSequence};
@@ -20,6 +21,8 @@ const MATE_UNMAPPED: u16 = 0x8;
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
     pub region: Option<Region>,
+    pub bed: Option<PathBuf>,
+    pub keep_bed_strand: bool,
     pub trimming: TrimmingOptions,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
@@ -39,6 +42,8 @@ impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
             region: None,
+            bed: None,
+            keep_bed_strand: false,
             trimming: TrimmingOptions::default(),
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
@@ -127,6 +132,7 @@ struct Extractor {
     reference: IndexedReference,
     references: Vec<ReferenceSequence>,
     selection: Option<ReferenceRange>,
+    bed: Option<BedSelection>,
     options: ExtractOptions,
     exhaustive: bool,
     report_reference_id: usize,
@@ -234,7 +240,15 @@ impl Extractor {
         let Some(context) = classify(&mut self.reference, &reference.name, position)? else {
             return Ok(None);
         };
-        if !self.includes(context.kind) {
+        if !self.includes(context.kind)
+            || self.bed.as_ref().is_some_and(|selection| {
+                !selection.contains(
+                    self.report_reference_id,
+                    self.report_position,
+                    context.strand == ReferenceStrand::Forward,
+                )
+            })
+        {
             return Ok(None);
         }
         self.stats.emitted_sites = checked_increment(self.stats.emitted_sites, "site")?;
@@ -267,7 +281,15 @@ impl Extractor {
         let Some(context) = classify(&mut self.reference, &reference.name, position)? else {
             return Ok(None);
         };
-        if !self.includes(context.kind) {
+        if !self.includes(context.kind)
+            || self.bed.as_ref().is_some_and(|selection| {
+                !selection.contains(
+                    reference_id,
+                    raw_position,
+                    context.strand == ReferenceStrand::Forward,
+                )
+            })
+        {
             return Ok(None);
         }
         let mut evidence = Vec::with_capacity(column.len());
@@ -390,12 +412,22 @@ fn extract_with_mode(
             "at least one methylation context must be enabled".into(),
         ));
     }
+    if options.keep_bed_strand && options.bed.is_none() {
+        return Err(RsomicsError::ConfigError(
+            "BED strand filtering requires --bed".into(),
+        ));
+    }
     let mut reader = rsomics_bamio::open_indexed_alignment(input, Some(reference))?;
     let header = reader
         .read_header()
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let bed = options
+        .bed
+        .as_deref()
+        .map(|path| BedSelection::load(path, &references, options.keep_bed_strand))
+        .transpose()?;
     let selection = options
         .region
         .as_ref()
@@ -424,6 +456,7 @@ fn extract_with_mode(
         reference: indexed_reference,
         references,
         selection: selection.as_ref().map(|selection| selection.range),
+        bed,
         options,
         exhaustive,
         report_reference_id,
@@ -562,6 +595,7 @@ mod tests {
                 },
             ],
             selection: None,
+            bed: None,
             options: ExtractOptions {
                 cpg: false,
                 chg: true,

@@ -11,3 +11,11 @@ follow its documented 1-based inclusive contract; the current upstream code
 incorrectly excludes the first requested position. Exhaustive cytosine-report
 goldens enable all three contexts; the zero-coverage variant uses `-q 61` to
 filter every alignment.
+
+The BED selection goldens use `[4,10)` in unstranded, top-only, and bottom-only
+forms. Extraction and M-bias outputs match the same live MethylDackel revision
+byte for byte after removing its path-dependent bedGraph header. Its exhaustive
+cytosine report leaks zero-coverage sites outside the requested BED, and its
+per-read path only checks processing chunks rather than individual alignments.
+The corresponding rsomics goldens instead apply BED selection to every reported
+cytosine and require each per-read alignment span and bisulfite strand to match.

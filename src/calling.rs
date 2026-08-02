@@ -16,7 +16,10 @@ pub(crate) struct AlignmentCaller {
 
 pub(crate) struct AlignmentLocation {
     pub(crate) chromosome: String,
+    pub(crate) reference_id: usize,
     pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) strand: BisulfiteStrand,
 }
 
 #[derive(Clone, Copy)]
@@ -130,7 +133,11 @@ impl AlignmentCaller {
         }
         Ok(AlignmentLocation {
             chromosome: reference.name.clone(),
+            reference_id,
             start: u64::try_from(start).map_err(|error| invalid_record(record, error))?,
+            end: u64::try_from(reference_position)
+                .map_err(|error| invalid_record(record, error))?,
+            strand,
         })
     }
 }

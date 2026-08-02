@@ -20,10 +20,14 @@ pub(crate) fn mbias_to_outputs(
     prefix: &Path,
     options: MbiasOptions,
 ) -> Result<MbiasOutputResult> {
+    let bed = options.bed.clone();
     let result = mbias(input, reference, options)?;
     let mut files = Vec::new();
     let table_path = suffix_path(prefix, "_mbias.tsv");
     reject_output_alias(&table_path, [input, reference])?;
+    if let Some(bed) = bed.as_deref() {
+        reject_output_alias(&table_path, [bed])?;
+    }
     files.push(OutputFile {
         strand: None,
         output: TransactionalOutput::new(&table_path)?,
@@ -31,6 +35,9 @@ pub(crate) fn mbias_to_outputs(
     for suggestion in result.suggestions() {
         let path = suffix_path(prefix, &format!("_{}.svg", suggestion.strand().label()));
         reject_output_alias(&path, [input, reference])?;
+        if let Some(bed) = bed.as_deref() {
+            reject_output_alias(&path, [bed])?;
+        }
         reject_output_alias(
             &path,
             files.iter().map(|file: &OutputFile| file.output.path()),

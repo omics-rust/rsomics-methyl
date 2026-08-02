@@ -26,9 +26,12 @@ struct CytosineReportOutput {
 }
 
 impl CytosineReportOutput {
-    fn new(prefix: &Path, input: &Path, reference: &Path) -> Result<Self> {
+    fn new(prefix: &Path, input: &Path, reference: &Path, bed: Option<&Path>) -> Result<Self> {
         let path = cytosine_report_path(prefix);
         reject_output_alias(&path, [input, reference])?;
+        if let Some(bed) = bed {
+            reject_output_alias(&path, [bed])?;
+        }
         Ok(Self {
             output: TransactionalOutput::new(&path)?,
             records: 0,
@@ -90,7 +93,8 @@ pub fn extract_to_outputs(
         )));
     }
     if matches!(format, ExtractFormat::CytosineReport) {
-        let mut output = CytosineReportOutput::new(prefix, input, reference)?;
+        let mut output =
+            CytosineReportOutput::new(prefix, input, reference, options.bed.as_deref())?;
         let path = output.output.path().to_owned();
         let stats =
             extract_all_cytosines(input, reference, options, |metric| output.write(&metric))?;
@@ -175,6 +179,9 @@ impl ContextOutputs {
             }
             let path = context_path(prefix, label, format);
             reject_output_alias(&path, [input, reference])?;
+            if let Some(bed) = options.bed.as_deref() {
+                reject_output_alias(&path, [bed])?;
+            }
             reject_output_alias(
                 &path,
                 entries

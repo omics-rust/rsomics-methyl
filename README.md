@@ -13,13 +13,17 @@ counts, fractions, total depth, logit, and methylKit representations are
 available. Complementary CpG and CHG strand calls can be merged before
 minimum-depth filtering. Indexed 1-based inclusive region selection is shared
 by extraction, M-bias, and per-read reporting. Extraction and M-bias share
-strand- and read-specific inclusion bounds and fixed-end trimming. BED
-selection, conversion, and variant surfaces remain absent until their full
-behavior and compatibility gates are implemented.
+strand- and read-specific inclusion bounds and fixed-end trimming. All three
+operations accept plain or gzip-compressed BED selection. With
+`--keep-bed-strand`, BED `+` selects top-strand and `-` bottom-strand evidence;
+per-read selection uses the complete alignment span. Conversion and variant
+surfaces remain absent until their full behavior and compatibility gates are
+implemented.
 
 ```console
 rsomics-methyl extract reference.fa alignments.bam --output-prefix sample --region chr1:1-1000000
 rsomics-methyl mbias reference.fa alignments.bam --output-prefix sample
+rsomics-methyl extract reference.fa alignments.bam --output-prefix selected --bed targets.bed --keep-bed-strand
 rsomics-methyl extract reference.fa alignments.bam --output-prefix trimmed --OT 5,100,1,96
 rsomics-methyl extract reference.fa alignments.bam --output-prefix sample --format cytosine-report --chg --chh
 rsomics-methyl merge-context reference.fa sample_CpG.bedGraph --output merged.bedGraph

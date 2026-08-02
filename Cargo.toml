@@ -24,10 +24,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 noodles = { version = "0.110", features = ["core", "fasta", "sam"] }
 rsomics-bamio = "0.6"
 rsomics-common = "0.12"
 rsomics-help = "0.4"
+rsomics-intervals = "0.3"
 rsomics-pileup = "0.6"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"

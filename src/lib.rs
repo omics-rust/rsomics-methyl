@@ -2,6 +2,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod alignment;
+mod bed;
 mod calling;
 mod context;
 pub mod extract;

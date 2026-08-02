@@ -90,6 +90,9 @@ struct ExtractArgs {
 
 #[derive(Debug, Args)]
 struct PileupFilterArgs {
+    #[command(flatten)]
+    bed: BedArgs,
+
     /// Minimum alignment mapping quality.
     #[arg(short = 'q', long, default_value_t = 10)]
     minimum_mapping_quality: u8,
@@ -136,6 +139,17 @@ struct PileupFilterArgs {
 
     #[command(flatten)]
     trimming: TrimmingArgs,
+}
+
+#[derive(Debug, Args)]
+struct BedArgs {
+    /// BED intervals to include; plain text and gzip are accepted.
+    #[arg(short = 'l', long, value_name = "FILE")]
+    bed: Option<PathBuf>,
+
+    /// Use BED column 6 to select top (+) or bottom (-) evidence.
+    #[arg(long, visible_alias = "keepStrand", requires = "bed")]
+    keep_bed_strand: bool,
 }
 
 #[derive(Debug, Args)]
@@ -259,6 +273,9 @@ struct PerReadArgs {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
+    #[command(flatten)]
+    bed: BedArgs,
+
     /// Minimum alignment mapping quality.
     #[arg(short = 'q', long, default_value_t = 10)]
     minimum_mapping_quality: u8,
@@ -309,9 +326,14 @@ fn execute_per_read(args: PerReadArgs, json: bool) -> Result<ExecutionReport> {
     }
     if let Some(output) = args.output.as_deref() {
         reject_output_alias(output, [args.reference.as_path(), args.input.as_path()])?;
+        if let Some(bed) = args.bed.bed.as_deref() {
+            reject_output_alias(output, [bed])?;
+        }
     }
     let options = PerReadOptions {
         region: args.region,
+        bed: args.bed.bed,
+        keep_bed_strand: args.bed.keep_bed_strand,
         minimum_mapping_quality: args.minimum_mapping_quality,
         minimum_base_quality: args.minimum_base_quality,
         ignore_flags: args.ignore_flags,
@@ -370,6 +392,8 @@ fn execute_extract(args: ExtractArgs) -> Result<ExecutionReport> {
     };
     let options = ExtractOptions {
         region: args.region,
+        bed: filters.bed.bed,
+        keep_bed_strand: filters.bed.keep_bed_strand,
         trimming,
         minimum_mapping_quality: filters.minimum_mapping_quality,
         minimum_base_quality: filters.minimum_base_quality,
@@ -415,6 +439,8 @@ fn execute_mbias(args: MbiasArgs) -> Result<ExecutionReport> {
         &args.output_prefix,
         MbiasOptions {
             region: args.region,
+            bed: filters.bed.bed,
+            keep_bed_strand: filters.bed.keep_bed_strand,
             trimming,
             minimum_mapping_quality: filters.minimum_mapping_quality,
             minimum_base_quality: filters.minimum_base_quality,

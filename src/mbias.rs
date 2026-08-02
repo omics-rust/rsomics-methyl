@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use noodles::core::Region;
 use rsomics_bamio::raw::RawRecordEncoder;
 use rsomics_common::{Result, RsomicsError};
 
 use crate::alignment::{AlignmentFilter, DUPLICATE};
+use crate::bed::BedSelection;
 use crate::calling::AlignmentCaller;
 use crate::context::SequenceContext;
 use crate::reference::IndexedReference;
@@ -16,6 +17,8 @@ use crate::trimming::TrimmingOptions;
 #[derive(Clone, Debug)]
 pub struct MbiasOptions {
     pub region: Option<Region>,
+    pub bed: Option<PathBuf>,
+    pub keep_bed_strand: bool,
     pub trimming: TrimmingOptions,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
@@ -34,6 +37,8 @@ impl Default for MbiasOptions {
     fn default() -> Self {
         Self {
             region: None,
+            bed: None,
+            keep_bed_strand: false,
             trimming: TrimmingOptions::default(),
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
@@ -156,12 +161,22 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
             "at least one methylation context must be enabled".into(),
         ));
     }
+    if options.keep_bed_strand && options.bed.is_none() {
+        return Err(RsomicsError::ConfigError(
+            "BED strand filtering requires --bed".into(),
+        ));
+    }
     let mut reader = rsomics_bamio::open_indexed_alignment(input, Some(reference))?;
     let header = reader
         .read_header()
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let bed = options
+        .bed
+        .as_deref()
+        .map(|path| BedSelection::load(path, &references, options.keep_bed_strand))
+        .transpose()?;
     let selection = options
         .region
         .as_ref()
@@ -202,6 +217,12 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
                 !selection
                     .range
                     .contains(call.reference_id, call.reference_position)
+            }) || bed.as_ref().is_some_and(|selection| {
+                !selection.contains(
+                    call.reference_id,
+                    call.reference_position,
+                    call.strand.is_top(),
+                )
             }) || !includes(&options, call.context)
                 || !options.trimming.includes(
                     call.strand,

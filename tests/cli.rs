@@ -717,3 +717,172 @@ fn failed_merge_preserves_existing_output() {
     assert!(!result.status.success());
     assert_eq!(std::fs::read(output).unwrap(), b"keep\n");
 }
+
+#[test]
+fn bed_selection_matches_live_extract_and_mbias_goldens() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for (label, bed, keep_strand) in [
+        ("selection", "selection.bed", None),
+        (
+            "selection.top",
+            "selection.top.bed",
+            Some("--keep-bed-strand"),
+        ),
+        (
+            "selection.bottom",
+            "selection.bottom.bed",
+            Some("--keepStrand"),
+        ),
+    ] {
+        let prefix = directory.path().join(label);
+        let mut extract = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"));
+        extract.args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--bed",
+            fixture.join(bed).to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ]);
+        if let Some(argument) = keep_strand {
+            extract.arg(argument);
+        }
+        let result = extract.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let observed = std::fs::read_to_string(format!("{}_CpG.bedGraph", prefix.display()))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            observed,
+            std::fs::read_to_string(fixture.join(format!("expected.{label}.bedGraph"))).unwrap()
+        );
+
+        let mut mbias = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"));
+        mbias.args([
+            "mbias",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "-l",
+            fixture.join(bed).to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+        ]);
+        if let Some(argument) = keep_strand {
+            mbias.arg(argument);
+        }
+        let result = mbias.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read(format!("{}_mbias.tsv", prefix.display())).unwrap(),
+            std::fs::read(fixture.join(format!("expected.{label}.mbias.tsv"))).unwrap()
+        );
+    }
+}
+
+#[test]
+fn exhaustive_report_obeys_bed_selection() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let prefix = directory.path().join("selected");
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "extract",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--bed",
+            fixture.join("selection.bed").to_str().unwrap(),
+            "--output-prefix",
+            prefix.to_str().unwrap(),
+            "--cytosine-report",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read(format!("{}.cytosine_report.txt", prefix.display())).unwrap(),
+        std::fs::read(fixture.join("expected.selection.cytosine-report.tsv")).unwrap()
+    );
+}
+
+#[test]
+fn per_read_bed_selection_uses_alignment_spans_and_bisulfite_strands() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for (label, bed, keep_strand) in [
+        ("top", "selection.top.bed", true),
+        ("bottom", "selection.bottom.bed", true),
+        ("empty", "selection.empty.bed", false),
+    ] {
+        let output = directory.path().join(format!("{label}.tsv"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"));
+        command.args([
+            "per-read",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--bed",
+            fixture.join(bed).to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        if keep_strand {
+            command.arg("--keep-bed-strand");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if label == "empty" {
+            assert!(std::fs::read(output).unwrap().is_empty());
+        } else {
+            assert_eq!(
+                std::fs::read(output).unwrap(),
+                std::fs::read(fixture.join(format!("expected.selection.{label}.per-read.tsv")))
+                    .unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_bed_preserves_per_read_output() {
+    let fixture = extract_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let bed = directory.path().join("invalid.bed");
+    let output = directory.path().join("reads.tsv");
+    std::fs::write(&bed, b"chrSynthetic -1 4\n").unwrap();
+    std::fs::write(&output, b"keep\n").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_rsomics-methyl"))
+        .args([
+            "per-read",
+            fixture.join("synthetic.fa").to_str().unwrap(),
+            fixture.join("synthetic.bam").to_str().unwrap(),
+            "--bed",
+            bed.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(output).unwrap(), b"keep\n");
+}

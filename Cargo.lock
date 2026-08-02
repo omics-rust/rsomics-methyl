@@ -643,14 +643,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsomics-intervals"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40cf072a5fb5900d8e4049cb9b03f28ce5ddc51e51ef2b3fed7c5c89bfa88ccd"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "rsomics-methyl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "flate2",
  "noodles",
  "rsomics-bamio",
  "rsomics-common",
  "rsomics-help",
+ "rsomics-intervals",
  "rsomics-pileup",
  "serde",
  "tempfile",

@@ -1,11 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use noodles::core::Region;
 use rsomics_bamio::raw::{RawRecord, RawRecordEncoder};
 use rsomics_common::{Result, RsomicsError};
 
 use crate::alignment::{AlignmentFilter, invalid_record};
-use crate::calling::AlignmentCaller;
+use crate::bed::BedSelection;
+use crate::calling::{AlignmentCaller, AlignmentLocation};
 use crate::context::SequenceContext;
 use crate::reference::IndexedReference;
 use crate::selection::{AlignmentRecordResult, alignment_records, resolve_region};
@@ -13,6 +14,8 @@ use crate::selection::{AlignmentRecordResult, alignment_records, resolve_region}
 #[derive(Clone, Debug)]
 pub struct PerReadOptions {
     pub region: Option<Region>,
+    pub bed: Option<PathBuf>,
+    pub keep_bed_strand: bool,
     pub minimum_mapping_quality: u8,
     pub minimum_base_quality: u8,
     pub ignore_flags: u16,
@@ -24,6 +27,8 @@ impl Default for PerReadOptions {
     fn default() -> Self {
         Self {
             region: None,
+            bed: None,
+            keep_bed_strand: false,
             minimum_mapping_quality: 10,
             minimum_base_quality: 5,
             ignore_flags: 0,
@@ -95,12 +100,22 @@ pub fn per_read(
             "minimum base quality must be positive".into(),
         ));
     }
+    if options.keep_bed_strand && options.bed.is_none() {
+        return Err(RsomicsError::ConfigError(
+            "BED strand filtering requires --bed".into(),
+        ));
+    }
     let mut reader = rsomics_bamio::open_indexed_alignment(input, Some(reference))?;
     let header = reader
         .read_header()
         .map_err(|error| alignment_error(input, error))?;
     let indexed_reference = IndexedReference::open(reference)?;
     let references = indexed_reference.validate_header(&header)?;
+    let bed = options
+        .bed
+        .as_deref()
+        .map(|path| BedSelection::load(path, &references, options.keep_bed_strand))
+        .transpose()?;
     let selection = options
         .region
         .as_ref()
@@ -137,7 +152,19 @@ pub fn per_read(
             stats.filtered_records = checked_increment(stats.filtered_records, "filtered record")?;
             return Ok(());
         }
-        emit(caller.metric(&record)?)?;
+        let result = caller.metric(&record)?;
+        if bed.as_ref().is_some_and(|selection| {
+            !selection.overlaps(
+                result.location.reference_id,
+                result.location.start,
+                result.location.end,
+                result.location.strand.is_top(),
+            )
+        }) {
+            stats.filtered_records = checked_increment(stats.filtered_records, "filtered record")?;
+            return Ok(());
+        }
+        emit(result.metric)?;
         stats.output_records = checked_increment(stats.output_records, "output record")?;
         Ok(())
     };
@@ -153,8 +180,13 @@ struct PerReadCaller {
     calls: AlignmentCaller,
 }
 
+struct PerReadCall {
+    metric: PerReadMetric,
+    location: AlignmentLocation,
+}
+
 impl PerReadCaller {
-    fn metric(&mut self, record: &RawRecord) -> Result<PerReadMetric> {
+    fn metric(&mut self, record: &RawRecord) -> Result<PerReadCall> {
         let mut methylated = 0u64;
         let mut unmethylated = 0u64;
         let location = self.calls.visit(record, |call| {
@@ -169,12 +201,15 @@ impl PerReadCaller {
         })?;
         let name = String::from_utf8(record.name().to_vec())
             .map_err(|_| invalid_record(record, "read name is not UTF-8"))?;
-        Ok(PerReadMetric {
-            name,
-            chromosome: location.chromosome,
-            start: location.start,
-            methylated,
-            unmethylated,
+        Ok(PerReadCall {
+            metric: PerReadMetric {
+                name,
+                chromosome: location.chromosome.clone(),
+                start: location.start,
+                methylated,
+                unmethylated,
+            },
+            location,
         })
     }
 }
@@ -278,7 +313,7 @@ mod tests {
         value.extend_from_slice(&(1u32 << 4).to_le_bytes());
         record.append_aux(*b"CG", b'B', &value).unwrap();
 
-        let metric = caller.metric(&record).unwrap();
+        let metric = caller.metric(&record).unwrap().metric;
         assert_eq!(metric.methylated(), 1);
         assert_eq!(metric.informative_bases(), 1);
     }
@@ -291,7 +326,7 @@ mod tests {
         let (_directory, mut caller) = caller(&reference);
         let record = raw(&[(0, 1), (3, 20_000), (0, 1)], b"CC");
 
-        let metric = caller.metric(&record).unwrap();
+        let metric = caller.metric(&record).unwrap().metric;
         assert_eq!(metric.methylated(), 2);
         assert_eq!(metric.informative_bases(), 2);
     }
@@ -301,7 +336,7 @@ mod tests {
         let (_directory, mut caller) = caller(b"CGCG");
         let record = raw_with_qualities(&[(0, 1), (2, 1), (0, 1)], b"CC", &[0, 40]);
 
-        let metric = caller.metric(&record).unwrap();
+        let metric = caller.metric(&record).unwrap().metric;
         assert_eq!(metric.methylated(), 1);
         assert_eq!(metric.informative_bases(), 1);
     }
