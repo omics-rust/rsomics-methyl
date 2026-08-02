@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use noodles::core::Region;
@@ -206,7 +205,7 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
     };
     let mut caller =
         AlignmentCaller::new(indexed_reference, references, options.minimum_base_quality);
-    let mut counts = BTreeMap::<(BisulfiteStrand, u64, u8), Counts>::new();
+    let mut counts: [Vec<[Counts; 2]>; 4] = Default::default();
     let mut stats = MbiasStats::default();
     visit_alignment_records(input, &mut reader, &header, selection.as_ref(), |record| {
         stats.input_records = increment(stats.input_records, "input record")?;
@@ -243,9 +242,21 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
             {
                 return Ok(());
             }
-            let entry = counts
-                .entry((call.strand, call.query_position, call.read))
-                .or_default();
+            let position = usize::try_from(call.query_position)
+                .map_err(|error| RsomicsError::InvalidInput(error.to_string()))?;
+            let read = usize::from(call.read.checked_sub(1).ok_or_else(|| {
+                RsomicsError::InvalidInput("M-bias read number is invalid".into())
+            })?);
+            let strand_counts = &mut counts[strand_index(call.strand)];
+            if position >= strand_counts.len() {
+                strand_counts.resize(position + 1, [Counts::default(); 2]);
+            }
+            let entry = strand_counts
+                .get_mut(position)
+                .and_then(|position| position.get_mut(read))
+                .ok_or_else(|| {
+                    RsomicsError::InvalidInput("M-bias read number is invalid".into())
+                })?;
             if call.methylated {
                 entry.methylated = increment(entry.methylated, "M-bias methylated count")?;
             } else {
@@ -256,26 +267,51 @@ pub fn mbias(input: &Path, reference: &Path, options: MbiasOptions) -> Result<Mb
         })?;
         Ok(())
     })?;
-    let metrics = counts
-        .into_iter()
-        .map(|((strand, query_position, read), counts)| {
-            Ok(MbiasMetric {
-                strand,
-                read,
-                position: query_position.checked_add(1).ok_or_else(|| {
-                    RsomicsError::InvalidInput("M-bias position overflows".into())
-                })?,
-                methylated: counts.methylated,
-                unmethylated: counts.unmethylated,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut metrics = Vec::new();
+    for (strand, strand_counts) in [
+        BisulfiteStrand::Ot,
+        BisulfiteStrand::Ob,
+        BisulfiteStrand::Ctot,
+        BisulfiteStrand::Ctob,
+    ]
+    .into_iter()
+    .zip(counts)
+    {
+        for (position, read_counts) in strand_counts.into_iter().enumerate() {
+            for (read, counts) in [(1, read_counts[0]), (2, read_counts[1])] {
+                if counts.methylated == 0 && counts.unmethylated == 0 {
+                    continue;
+                }
+                metrics.push(MbiasMetric {
+                    strand,
+                    read,
+                    position: u64::try_from(position)
+                        .ok()
+                        .and_then(|position| position.checked_add(1))
+                        .ok_or_else(|| {
+                            RsomicsError::InvalidInput("M-bias position overflows".into())
+                        })?,
+                    methylated: counts.methylated,
+                    unmethylated: counts.unmethylated,
+                });
+            }
+        }
+    }
     let suggestions = suggestions(&metrics)?;
     Ok(MbiasResult {
         metrics,
         suggestions,
         stats,
     })
+}
+
+fn strand_index(strand: BisulfiteStrand) -> usize {
+    match strand {
+        BisulfiteStrand::Ot => 0,
+        BisulfiteStrand::Ob => 1,
+        BisulfiteStrand::Ctot => 2,
+        BisulfiteStrand::Ctob => 3,
+    }
 }
 
 fn includes(options: &MbiasOptions, context: SequenceContext) -> bool {

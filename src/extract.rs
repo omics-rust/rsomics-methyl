@@ -291,7 +291,13 @@ impl Extractor {
             .ok_or_else(|| RsomicsError::InvalidInput("report reference is absent".into()))?;
         let position = usize::try_from(self.report_position).map_err(invalid_coordinate)?;
         let length = usize::try_from(reference.length).map_err(invalid_coordinate)?;
-        let Some(context) = classify(&mut self.reference, &reference.name, length, position)?
+        let Some(context) = classify(
+            &mut self.reference,
+            self.report_reference_id,
+            &reference.name,
+            length,
+            position,
+        )?
         else {
             return Ok(None);
         };
@@ -334,7 +340,13 @@ impl Extractor {
         })?;
         let position = usize::try_from(raw_position).map_err(invalid_coordinate)?;
         let length = usize::try_from(reference.length).map_err(invalid_coordinate)?;
-        let Some(context) = classify(&mut self.reference, &reference.name, length, position)?
+        let Some(context) = classify(
+            &mut self.reference,
+            reference_id,
+            &reference.name,
+            length,
+            position,
+        )?
         else {
             return Ok(None);
         };

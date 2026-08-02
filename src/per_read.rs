@@ -193,10 +193,11 @@ impl PerReadCaller {
         })?;
         let name = String::from_utf8(record.name().to_vec())
             .map_err(|_| invalid_record(record, "read name is not UTF-8"))?;
+        let chromosome = self.calls.reference_name(location.reference_id).to_owned();
         Ok(PerReadCall {
             metric: PerReadMetric {
                 name,
-                chromosome: location.chromosome.clone(),
+                chromosome,
                 start: location.start,
                 methylated,
                 unmethylated,

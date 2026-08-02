@@ -2,7 +2,7 @@ use rsomics_bamio::raw::RawRecord;
 use rsomics_common::Result;
 
 use crate::alignment::invalid_record;
-use crate::context::{ReferenceStrand, SequenceContext, classify};
+use crate::context::{ReferenceStrand, SequenceContext, classify_call};
 use crate::reference::{IndexedReference, ReferenceSequence};
 use crate::strand::{BisulfiteStrand, bisulfite_strand};
 
@@ -15,7 +15,6 @@ pub(crate) struct AlignmentCaller {
 }
 
 pub(crate) struct AlignmentLocation {
-    pub(crate) chromosome: String,
     pub(crate) reference_id: usize,
     pub(crate) start: u64,
     pub(crate) end: u64,
@@ -62,6 +61,9 @@ impl AlignmentCaller {
             usize::try_from(reference.length).map_err(|error| invalid_record(record, error))?;
         let strand = bisulfite_strand(record)?;
         let read = read_number(record);
+        let sequence_length = record.sequence_len();
+        let sequence = record.seq_bytes_packed();
+        let quality_scores = record.quality_scores();
         let mut query_position = 0usize;
         let mut reference_position = start;
         for (kind, raw_length) in record.decoded_cigar()? {
@@ -70,30 +72,30 @@ impl AlignmentCaller {
             match kind {
                 0 | 7 | 8 => {
                     for _ in 0..length {
-                        if query_position >= record.sequence_len() {
+                        if query_position >= sequence_length {
                             return Err(invalid_record(
                                 record,
                                 "CIGAR consumes beyond the sequence",
                             ));
                         }
-                        let quality = record
-                            .quality_scores()
+                        let quality = quality_scores
                             .get(query_position)
                             .copied()
                             .unwrap_or(u8::MAX);
                         if quality >= self.minimum_base_quality
-                            && let Some(context) = classify(
+                            && let Some(methylated) =
+                                methylation_state(strand, packed_base(sequence, query_position))
+                            && let Some((context, reference_strand)) = classify_call(
                                 &mut self.reference,
+                                reference_id,
                                 &reference.name,
                                 reference_length,
                                 reference_position,
                             )?
-                            && strand.is_top() == (context.strand == ReferenceStrand::Forward)
-                            && let Some(methylated) =
-                                methylation_state(strand, record.seq_nibble(query_position))
+                            && strand.is_top() == (reference_strand == ReferenceStrand::Forward)
                         {
                             emit(MethylationCall {
-                                context: context.kind,
+                                context,
                                 reference_id,
                                 reference_position: u64::try_from(reference_position)
                                     .map_err(|error| invalid_record(record, error))?,
@@ -123,12 +125,12 @@ impl AlignmentCaller {
                 }
             }
         }
-        if query_position != record.sequence_len() {
+        if query_position != sequence_length {
             return Err(invalid_record(
                 record,
                 format!(
                     "CIGAR consumes {query_position} query bases instead of {}",
-                    record.sequence_len()
+                    sequence_length
                 ),
             ));
         }
@@ -136,13 +138,19 @@ impl AlignmentCaller {
             return Err(invalid_record(record, "CIGAR extends beyond the reference"));
         }
         Ok(AlignmentLocation {
-            chromosome: reference.name.to_string(),
             reference_id,
             start: u64::try_from(start).map_err(|error| invalid_record(record, error))?,
             end: u64::try_from(reference_position)
                 .map_err(|error| invalid_record(record, error))?,
             strand,
         })
+    }
+
+    pub(crate) fn reference_name(&self, reference_id: usize) -> &str {
+        self.references
+            .get(reference_id)
+            .map(|reference| reference.name.as_ref())
+            .expect("alignment location has a validated reference ID")
     }
 }
 
@@ -155,6 +163,16 @@ fn methylation_state(strand: BisulfiteStrand, base: u8) -> Option<bool> {
         (true, 2) | (false, 4) => Some(true),
         (true, 8) | (false, 1) => Some(false),
         _ => None,
+    }
+}
+
+#[inline]
+fn packed_base(sequence: &[u8], position: usize) -> u8 {
+    let byte = sequence[position / 2];
+    if position.is_multiple_of(2) {
+        byte >> 4
+    } else {
+        byte & 0x0f
     }
 }
 

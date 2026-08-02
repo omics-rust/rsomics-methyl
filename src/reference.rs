@@ -15,6 +15,7 @@ pub(crate) struct IndexedReference {
     reader: fasta::io::IndexedReader<fasta::io::BufReader<File>>,
     path: PathBuf,
     lengths: HashMap<Vec<u8>, u64>,
+    reference_id: Option<usize>,
     chromosome: Vec<u8>,
     sequence_start: usize,
     sequence: Vec<u8>,
@@ -46,6 +47,7 @@ impl IndexedReference {
             reader,
             path: path.to_path_buf(),
             lengths,
+            reference_id: None,
             chromosome: Vec::new(),
             sequence_start: 0,
             sequence: Vec::new(),
@@ -86,40 +88,72 @@ impl IndexedReference {
     }
 
     pub(crate) fn sequence(&mut self, chromosome: &str, range: Range<usize>) -> Result<&[u8]> {
-        let needs_fetch = self.chromosome != chromosome.as_bytes()
+        let needs_fetch = self.reference_id.is_some()
+            || self.chromosome != chromosome.as_bytes()
             || range.start < self.sequence_start
             || range.end > self.sequence_start + self.sequence.len();
         if needs_fetch {
-            let length =
-                usize::try_from(self.length(chromosome)?).map_err(|error| self.error(error))?;
-            if range.start >= range.end || range.end > length {
-                return Err(self.error("requested reference range is invalid"));
-            }
-            let start = range.start;
-            let end = start
-                .checked_add(CHUNK_SIZE)
-                .map_or(length, |value| value.min(length))
-                .max(range.end);
-            let interval_start =
-                Position::try_from(start + 1).map_err(|error| self.error(error))?;
-            let interval_end = Position::try_from(end).map_err(|error| self.error(error))?;
-            let record = self
-                .reader
-                .query(&Region::new(
-                    chromosome.as_bytes().to_vec(),
-                    interval_start..=interval_end,
-                ))
-                .map_err(|error| self.error(error))?;
-            self.chromosome.clear();
-            self.chromosome.extend_from_slice(chromosome.as_bytes());
-            self.sequence_start = start;
-            self.sequence.clear();
-            self.sequence.extend_from_slice(record.sequence().as_ref());
-            #[cfg(test)]
-            {
-                self.fetch_count += 1;
-            }
+            self.fetch(None, chromosome, range.clone())?;
         }
+        self.cached_range(range)
+    }
+
+    #[inline]
+    pub(crate) fn sequence_by_id(
+        &mut self,
+        reference_id: usize,
+        chromosome: &str,
+        range: Range<usize>,
+    ) -> Result<&[u8]> {
+        let needs_fetch = self.reference_id != Some(reference_id)
+            || range.start < self.sequence_start
+            || range.end > self.sequence_start + self.sequence.len();
+        if needs_fetch {
+            self.fetch(Some(reference_id), chromosome, range.clone())?;
+        }
+        self.cached_range(range)
+    }
+
+    fn fetch(
+        &mut self,
+        reference_id: Option<usize>,
+        chromosome: &str,
+        range: Range<usize>,
+    ) -> Result<()> {
+        let length =
+            usize::try_from(self.length(chromosome)?).map_err(|error| self.error(error))?;
+        if range.start >= range.end || range.end > length {
+            return Err(self.error("requested reference range is invalid"));
+        }
+        let start = range.start;
+        let end = start
+            .checked_add(CHUNK_SIZE)
+            .map_or(length, |value| value.min(length))
+            .max(range.end);
+        let interval_start = Position::try_from(start + 1).map_err(|error| self.error(error))?;
+        let interval_end = Position::try_from(end).map_err(|error| self.error(error))?;
+        let record = self
+            .reader
+            .query(&Region::new(
+                chromosome.as_bytes().to_vec(),
+                interval_start..=interval_end,
+            ))
+            .map_err(|error| self.error(error))?;
+        self.reference_id = reference_id;
+        self.chromosome.clear();
+        self.chromosome.extend_from_slice(chromosome.as_bytes());
+        self.sequence_start = start;
+        self.sequence.clear();
+        self.sequence.extend_from_slice(record.sequence().as_ref());
+        #[cfg(test)]
+        {
+            self.fetch_count += 1;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn cached_range(&self, range: Range<usize>) -> Result<&[u8]> {
         let start = range
             .start
             .checked_sub(self.sequence_start)
