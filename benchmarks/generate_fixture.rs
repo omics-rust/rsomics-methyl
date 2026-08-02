@@ -6,15 +6,17 @@ use std::path::Path;
 const READ_LENGTH: usize = 100;
 const TARGET_DEPTH: usize = 512;
 const TARGET_SPACING: usize = 1000;
+const RRBS_DEPTH: usize = 40;
+const RRBS_SPACING: usize = 500;
 
 fn main() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let reference = args
         .next()
-        .expect("usage: generate_fixture <reference.fa> <records> [single|paired|targeted]");
+        .expect("usage: generate_fixture <reference.fa> <records> [single|paired|targeted|rrbs]");
     let records: usize = args
         .next()
-        .expect("usage: generate_fixture <reference.fa> <records> [single|paired|targeted]")
+        .expect("usage: generate_fixture <reference.fa> <records> [single|paired|targeted|rrbs]")
         .to_string_lossy()
         .parse()
         .expect("record count must be an integer");
@@ -28,7 +30,11 @@ fn main() -> io::Result<()> {
             .div_ceil(TARGET_DEPTH)
             .saturating_mul(TARGET_SPACING)
             .saturating_add(READ_LENGTH),
-        _ => panic!("mode must be single, paired, or targeted"),
+        Some("rrbs") => records
+            .div_ceil(RRBS_DEPTH)
+            .saturating_mul(RRBS_SPACING)
+            .saturating_add(READ_LENGTH),
+        _ => panic!("mode must be single, paired, targeted, or rrbs"),
     }
     .max(100_000);
     let mixed_contexts = mode == "targeted";
@@ -37,6 +43,7 @@ fn main() -> io::Result<()> {
         Some("single") => write_single(records, reference_length),
         Some("paired") => write_paired(records, reference_length),
         Some("targeted") => write_targeted(records, reference_length),
+        Some("rrbs") => write_rrbs(records, reference_length),
         _ => unreachable!(),
     }
 }
@@ -128,6 +135,30 @@ fn write_targeted(records: usize, reference_length: usize) -> io::Result<()> {
             "t{record:08}\t{flag}\tchrWgbs\t{}\t{mapq}\t100M\t*\t0\t0\t{}\t{}\tXG:Z:{}",
             start + 1,
             sequence(start, record, top, true),
+            quality,
+            if top { "CT" } else { "GA" }
+        )?;
+    }
+    output.flush()
+}
+
+fn write_rrbs(records: usize, reference_length: usize) -> io::Result<()> {
+    let mut output = BufWriter::with_capacity(1024 * 1024, io::stdout().lock());
+    write_header(&mut output, reference_length)?;
+    let quality = "I".repeat(READ_LENGTH);
+    for record in 0..records {
+        let start = record / RRBS_DEPTH * RRBS_SPACING + record % RRBS_DEPTH / 8;
+        let top = record % 2 == 0;
+        let mut flag = if top { 0 } else { 16 };
+        if record % 97 == 0 {
+            flag |= 1024;
+        }
+        let mapq = if record % 997 == 0 { 0 } else { 60 };
+        writeln!(
+            output,
+            "r{record:08}\t{flag}\tchrWgbs\t{}\t{mapq}\t100M\t*\t0\t0\t{}\t{}\tXG:Z:{}",
+            start + 1,
+            sequence(start, record, top, false),
             quality,
             if top { "CT" } else { "GA" }
         )?;
