@@ -12,6 +12,7 @@ pub(crate) struct AlignmentCaller {
     reference: IndexedReference,
     references: Vec<ReferenceSequence>,
     minimum_base_quality: u8,
+    cigar: Vec<(u8, u32)>,
 }
 
 pub(crate) struct AlignmentLocation {
@@ -42,6 +43,7 @@ impl AlignmentCaller {
             reference,
             references,
             minimum_base_quality,
+            cigar: Vec::with_capacity(16),
         }
     }
 
@@ -82,13 +84,8 @@ impl AlignmentCaller {
         let quality_scores = record.quality_scores();
         let mut query_position = 0usize;
         let mut reference_position = start;
-        for (kind, raw_length) in cigar_operations(record)? {
-            if raw_length == 0 {
-                return Err(invalid_record(
-                    record,
-                    "CIGAR contains a zero-length operation",
-                ));
-            }
+        record.decode_cigar_into(&mut self.cigar)?;
+        for &(kind, raw_length) in &self.cigar {
             let length =
                 usize::try_from(raw_length).map_err(|error| invalid_record(record, error))?;
             match kind {
@@ -206,32 +203,6 @@ impl AlignmentCaller {
             .map(|reference| reference.name.as_ref())
             .expect("alignment location has a validated reference ID")
     }
-}
-
-enum CigarOperations {
-    One(Option<(u8, u32)>),
-    Many(std::vec::IntoIter<(u8, u32)>),
-}
-
-impl Iterator for CigarOperations {
-    type Item = (u8, u32);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::One(operation) => operation.take(),
-            Self::Many(operations) => operations.next(),
-        }
-    }
-}
-
-fn cigar_operations(record: &RawRecord) -> Result<CigarOperations> {
-    let mut operations = record.cigar_ops();
-    let first = operations.next();
-    let second = operations.next();
-    if let (Some(operation), None) = (first, second) {
-        return Ok(CigarOperations::One(Some(operation)));
-    }
-    Ok(CigarOperations::Many(record.decoded_cigar()?.into_iter()))
 }
 
 pub(crate) fn read_number(record: &RawRecord) -> u8 {
